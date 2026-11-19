@@ -1,0 +1,18 @@
+name: Build YueLiao IPA
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native YueLiao
+        run: |
+          ruby -ryaml -e 'f=Dir.glob("*.github/workflows/build-yueliao.yml").fetch(0); print YAML.load_file(f).fetch("jobs").values.first.fetch("steps").find{|s| s.key?("run")}.fetch("run")' > "$RUNNER_TEMP/build-yueliao.sh"
+          bash -e "$RUNNER_TEMP/build-yueliao.sh"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YueLiao-SideStore
+          path: native-ios/YueLiao.ipa
+          if-no-files-found: error
