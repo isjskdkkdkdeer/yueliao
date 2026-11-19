@@ -1,16 +1,252 @@
 name: Build YueLiao IPA
-on: [push, workflow_dispatch]
+on:
+  push:
+    paths: ['.github/workflows/build-yueliao.yml']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  build:
+  ipa:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build native YueLiao
-        run: |
-          ruby -ryaml -e 'f=Dir.glob("*.github/workflows/build-yueliao.yml").fetch(0); print YAML.load_file(f).fetch("jobs").values.first.fetch("steps").find{|s| s.key?("run")}.fetch("run")' > "$RUNNER_TEMP/build-yueliao.sh"
-          bash -e "$RUNNER_TEMP/build-yueliao.sh"
+      - run: |
+          set -eu
+          command -v xcodegen || brew install xcodegen
+          mkdir -p native-ios/YueLiao
+          cat > native-ios/YueLiao/PeoplePage.swift <<'YUELIAO_SOURCE'
+          import SwiftUI
+
+          struct PersonEntry: Codable, Identifiable {
+              let id: String
+              let name: String
+              var draft = ""
+          }
+
+          final class Notebook: ObservableObject {
+              @Published var entries: [PersonEntry] {
+                  didSet {
+                      if let data = try? JSONEncoder().encode(entries) {
+                          UserDefaults.standard.set(data, forKey: "nativePeople")
+                      }
+                  }
+              }
+              init() {
+                  let data = UserDefaults.standard.data(forKey: "nativePeople") ?? Data()
+                  entries = (try? JSONDecoder().decode([PersonEntry].self, from: data)) ?? []
+              }
+          }
+
+          struct PeoplePage: View {
+              @ObservedObject var notebook: Notebook
+              let chats: Bool
+              @State private var query = ""
+              @State private var adding = false
+              @State private var name = ""
+              @State private var number = ""
+
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          ForEach($notebook.entries) { $person in
+                              if (query.isEmpty || person.name.localizedCaseInsensitiveContains(query) || person.id.contains(query)) && (!chats || !person.draft.isEmpty) {
+                                  NavigationLink {
+                                      Form {
+                                          Section("越聊号") { Text(person.id).textSelection(.enabled) }
+                                          Section("本机草稿") {
+                                              TextField("写下消息", text: $person.draft, axis: .vertical)
+                                          }
+                                          Text("草稿自动保存在这台设备，尚未发送。").foregroundStyle(.secondary)
+                                      }.navigationTitle(person.name)
+                                  } label: {
+                                      HStack(spacing: 12) {
+                                          Text(String(person.name.prefix(1))).frame(width: 44, height: 44)
+                                              .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                                          VStack(alignment: .leading) {
+                                              Text(person.name)
+                                              Text(chats ? person.draft : person.id).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          if notebook.entries.isEmpty || (chats && notebook.entries.allSatisfy({ $0.draft.isEmpty })) {
+                              Text(chats ? "暂无消息草稿，可在通讯录中选择联系人开始编辑。" : "点右上角添加本机联系人。").foregroundStyle(.secondary)
+                          }
+                      }.navigationTitle(chats ? "聊天" : "通讯录")
+                      .searchable(text: $query, prompt: "昵称或越聊号")
+                      .toolbar {
+                          if !chats {
+                              Button { adding = true } label: { Image(systemName: "person.badge.plus") }.accessibilityLabel("添加联系人")
+                          }
+                      }.sheet(isPresented: $adding) {
+                          NavigationStack {
+                              Form {
+                                  TextField("昵称", text: $name)
+                                  TextField("越聊号", text: $number).keyboardType(.numberPad)
+                                  if notebook.entries.contains(where: { $0.id == number }) { Text("此号码已在通讯录中") }
+                              }.navigationTitle("添加本机联系人").toolbar {
+                                  ToolbarItem(placement: .cancellationAction) { Button("取消") { adding = false } }
+                                  ToolbarItem(placement: .confirmationAction) {
+                                      Button("保存") {
+                                          notebook.entries.append(PersonEntry(id: number, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
+                                          adding = false
+                                      }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || number.range(of: "^[0-9]{1,10}$", options: .regularExpression) == nil || notebook.entries.contains(where: { $0.id == number }))
+                                  }
+                              }
+                          }
+                      }.onChange(of: adding) { visible in if !visible { number = ""; name = "" } }
+                  }
+              }
+          }
+          YUELIAO_SOURCE
+          cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
+          import SwiftUI
+          import PhotosUI
+
+          @main struct YueLiaoApp: App {
+              var body: some Scene { WindowGroup { RootView() } }
+          }
+          struct RootView: View {
+              @StateObject private var notebook = Notebook()
+              var body: some View {
+                  TabView {
+                      PeoplePage(notebook: notebook, chats: true)
+                          .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
+                      PeoplePage(notebook: notebook, chats: false)
+                          .tabItem { Label("通讯录", systemImage: "person.2") }
+                      PendingView(title: "通话", detail: "原生音视频、来电推送与实时字幕尚未接入。", symbol: "video")
+                          .tabItem { Label("通话", systemImage: "video") }
+                      ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
+                  }.tint(.blue)
+              }
+          }
+          struct PendingView: View {
+              let title: String
+              let detail: String
+              let symbol: String
+              var body: some View {
+                  NavigationStack {
+                      VStack(spacing: 20) {
+                          Image(systemName: symbol).font(.system(size: 42)).foregroundStyle(.secondary)
+                          Text(detail).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                          Link("打开越聊网页版", destination: URL(string: "https://yueliao.eu.cc")!)
+                      }.padding(32).navigationTitle(title)
+                  }
+              }
+          }
+          struct ProfileView: View {
+              @AppStorage("nickname") private var nickname = "越聊用户"
+              @AppStorage("avatarData") private var avatarData = Data()
+              @AppStorage("language") private var language = "中文"
+              @State private var selectedPhoto: PhotosPickerItem?
+              @State private var editing = false
+              @State private var draftName = ""
+              var avatar: some View {
+                  Group {
+                      if let image = UIImage(data: avatarData) {
+                          Image(uiImage: image).resizable().scaledToFill()
+                      } else {
+                          Image(systemName: "person.crop.circle.fill").resizable().scaledToFit().foregroundStyle(.white.opacity(0.85))
+                      }
+                  }
+              }
+              var body: some View {
+                  NavigationStack {
+                      ScrollView {
+                          VStack(spacing: 0) {
+                              ZStack(alignment: .bottomLeading) {
+                                  LinearGradient(colors: [.black, Color(white: 0.22)], startPoint: .bottomLeading, endPoint: .topTrailing)
+                                  avatar.frame(width: 260, height: 260).clipped().grayscale(1).opacity(0.23).frame(maxWidth: .infinity, alignment: .trailing)
+                                  VStack(alignment: .leading, spacing: 68) {
+                                      Text("越聊 · YUÈ LIÁO").font(.caption).tracking(3).foregroundStyle(.white.opacity(0.7))
+                                      HStack(spacing: 16) {
+                                          PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                                              avatar.frame(width: 74, height: 74).clipShape(Circle()).overlay(Circle().stroke(.white, lineWidth: 3))
+                                          }.accessibilityLabel("更换头像")
+                                          VStack(alignment: .leading, spacing: 8) {
+                                              Text(nickname).font(.title2.bold()).foregroundStyle(.white)
+                                              Text("本机资料 · 尚未绑定越聊账号").font(.caption).foregroundStyle(.white.opacity(0.75))
+                                          }
+                                          Spacer()
+                                          Button { draftName = nickname; editing = true } label: { Image(systemName: "chevron.right").foregroundStyle(.white) }.accessibilityLabel("修改昵称")
+                                      }
+                                  }.padding(24).padding(.bottom, 20)
+                              }.frame(height: 280)
+                              VStack(spacing: 16) {
+                                  VStack(spacing: 0) {
+                                      Button { draftName = nickname; editing = true } label: { row("个人资料", "person.fill", .blue) }
+                                      Divider().padding(.leading, 64)
+                                      NavigationLink { PendingView(title: "账号与登录", detail: "本工程尚未接入原生账号登录。昵称与头像只保存在这台设备。", symbol: "lock") } label: { row("账号与登录", "lock.fill", .orange) }
+                                      Divider().padding(.leading, 64)
+                                      HStack { Image(systemName: "character.bubble.fill").foregroundStyle(.green); Picker("我的语言", selection: $language) { Text("中文").tag("中文"); Text("Tiếng Việt").tag("Tiếng Việt") } }.padding(18)
+                                  }.background(.background, in: RoundedRectangle(cornerRadius: 20))
+                                  VStack(spacing: 0) {
+                                      NavigationLink { PendingView(title: "消息通知", detail: "APNs、来电推送及 CallKit 尚未接入，不能接收锁屏来电。", symbol: "bell") } label: { row("消息通知", "bell.fill", .blue) }
+                                      Divider().padding(.leading, 64)
+                                      Link(destination: URL(string: "https://yueliao.eu.cc/privacy.html")!) { row("隐私说明", "hand.raised.fill", .gray) }
+                                      Divider().padding(.leading, 64)
+                                      NavigationLink { Text("越聊 iOS 原生界面工程 0.1\n\n此版本只完成个人页与底部导航。聊天、账号同步、音视频与推送仍待开发。\n\n非已签名安装包。").padding().navigationTitle("关于越聊") } label: { row("关于越聊", "info.circle.fill", .purple) }
+                                  }.background(.background, in: RoundedRectangle(cornerRadius: 20))
+                                  Text("本机资料不会自动同步到网页账号。").font(.footnote).foregroundStyle(.secondary)
+                              }.padding(16).background(Color(uiColor: .systemGroupedBackground), in: RoundedRectangle(cornerRadius: 26)).offset(y: -20)
+                          }
+                      }.background(Color(uiColor: .systemGroupedBackground)).ignoresSafeArea(edges: .top)
+                      .sheet(isPresented: $editing) {
+                          NavigationStack { Form { TextField("昵称", text: $draftName) }.navigationTitle("个人资料").toolbar {
+                              ToolbarItem(placement: .cancellationAction) { Button("取消") { editing = false } }
+                              ToolbarItem(placement: .confirmationAction) { Button("保存") { nickname = String(draftName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(20)); editing = false }.disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+                          } }
+                      }
+                      .task(id: selectedPhoto) {
+                          if let data = try? await selectedPhoto?.loadTransferable(type: Data.self), let image = UIImage(data: data) {
+                              let renderer = UIGraphicsImageRenderer(size: CGSize(width: 512, height: 512))
+                              let thumb = renderer.image { _ in image.draw(in: CGRect(x: 0, y: 0, width: 512, height: 512)) }
+                              avatarData = thumb.jpegData(compressionQuality: 0.85) ?? Data()
+                          }
+                      }
+                  }
+              }
+              private func row(_ title: String, _ icon: String, _ color: Color) -> some View {
+                  HStack(spacing: 14) {
+                      Image(systemName: icon).frame(width: 34, height: 34).foregroundStyle(.white).background(color, in: RoundedRectangle(cornerRadius: 9))
+                      Text(title).foregroundStyle(.primary)
+                      Spacer()
+                      Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                  }.padding(16).contentShape(Rectangle())
+              }
+          }
+          YUELIAO_SOURCE
+          cat > native-ios/project.yml <<'YUELIAO_SOURCE'
+          name: YueLiao
+          options:
+            bundleIdPrefix: cc.eu.yueliao
+            deploymentTarget:
+              iOS: '16.0'
+          targets:
+            YueLiao:
+              type: application
+              platform: iOS
+              sources: [YueLiao]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: cc.eu.yueliao.ios
+                  SWIFT_VERSION: '5.0'
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: 越聊
+                  TARGETED_DEVICE_FAMILY: '1'
+                  MARKETING_VERSION: '0.1.0'
+                  CURRENT_PROJECT_VERSION: '1'
+              scheme:
+                gatherCoverageData: false
+          YUELIAO_SOURCE
+          cd native-ios
+          xcodegen generate
+          xcodebuild -project YueLiao.xcodeproj -scheme YueLiao -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
+          test -x Payload/YueLiao.app/YueLiao
+          /usr/bin/ditto -c -k --keepParent Payload YueLiao.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: YueLiao-SideStore
