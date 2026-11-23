@@ -1,7 +1,7 @@
 name: Build YueLiao IPA
 on:
   push:
-    paths: ['.github/workflows/build-yueliao.yml']
+    paths: ['.github/workflows/构建-yueliao.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -253,6 +253,10 @@ jobs:
           cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
           import SwiftUI
           import PhotosUI
+          import Translation
+          import Speech
+          import AVFoundation
+          import UIKit
 
           @main struct YueLiaoApp: App {
               var body: some Scene { WindowGroup { RootView() } }
@@ -265,8 +269,8 @@ jobs:
                           .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
                       PeoplePage(notebook: notebook, chats: false)
                           .tabItem { Label("通讯录", systemImage: "person.2") }
-                      PendingView(title: "通话", detail: "原生音视频、来电推送与实时字幕尚未接入。", symbol: "video")
-                          .tabItem { Label("通话", systemImage: "video") }
+                      LocalTranslationView()
+                          .tabItem { Label("本地翻译", systemImage: "waveform.and.mic") }
                       ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
                   }.tint(.blue)
               }
@@ -285,6 +289,174 @@ jobs:
                   }
               }
           }
+          struct LocalTranslationView: View {
+              @State private var sourceLanguage = "zh-CN"
+              @State private var transcript = ""
+              @State private var translated = ""
+              @State private var status = "点击开始，用本机麦克风说话"
+              @State private var isRecording = false
+              @State private var configuration = TranslationSession.Configuration(
+                  source: Locale.Language(identifier: "zh-Hans"),
+                  target: Locale.Language(identifier: "vi")
+              )
+              @State private var translationSession: TranslationSession?
+              @State private var audioEngine = AVAudioEngine()
+              @State private var request: SFSpeechAudioBufferRecognitionRequest?
+              @State private var recognitionTask: SFSpeechRecognitionTask?
+              @State private var debounceTask: Task<Void, Never>?
+              @State private var synthesizer = AVSpeechSynthesizer()
+
+              private var targetLanguage: String { sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN" }
+              private var direction: String { sourceLanguage == "zh-CN" ? "中文 → 越南语" : "越南语 → 中文" }
+
+              var body: some View {
+                  NavigationStack {
+                      VStack(spacing: 16) {
+                          Text("本地翻译测试").font(.title2.bold())
+                          Text("语音识别和文字翻译在 iPhone 本机运行。此页面只测试本机麦克风，尚未接入通话中的对方声音。播放译声也只在本机播放。")
+                              .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                          Button {
+                              sourceLanguage = sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN"
+                              configuration = makeConfiguration()
+                              translated = ""
+                          } label: {
+                              Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
+                          }.buttonStyle(.bordered).disabled(isRecording)
+                          GroupBox("识别原文") {
+                              Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
+                                  .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                          }
+                          GroupBox("本地翻译") {
+                              Text(translated.isEmpty ? "翻译结果会显示在这里" : translated)
+                                  .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                          }
+                          HStack {
+                              Button(isRecording ? "停止识别" : "开始本地识别") {
+                                  if isRecording { stopRecognition() } else { Task { await startRecognition() } }
+                              }.buttonStyle(.borderedProminent)
+                              Button { speakTranslation() } label: {
+                                  Label("播放译声", systemImage: "speaker.wave.2")
+                              }.buttonStyle(.bordered).disabled(translated.isEmpty)
+                          }
+                          Text(status).font(.footnote).foregroundStyle(.secondary)
+                              .frame(maxWidth: .infinity, alignment: .leading)
+                          Spacer(minLength: 0)
+                      }
+                      .padding(20)
+                      .navigationTitle("本地翻译")
+                      .translationTask(configuration) { session in
+                          translationSession = session
+                          if !transcript.isEmpty { await translateText(transcript) }
+                      }
+                      .onDisappear { stopRecognition() }
+                  }
+              }
+
+              private func makeConfiguration() -> TranslationSession.Configuration {
+                  let from = sourceLanguage == "zh-CN" ? "zh-Hans" : "vi"
+                  let to = sourceLanguage == "zh-CN" ? "vi" : "zh-Hans"
+                  return TranslationSession.Configuration(
+                      source: Locale.Language(identifier: from),
+                      target: Locale.Language(identifier: to)
+                  )
+              }
+
+              @MainActor
+              private func startRecognition() async {
+                  let micAllowed: Bool = await withCheckedContinuation { continuation in
+                      AVAudioSession.sharedInstance().requestRecordPermission { allowed in
+                          continuation.resume(returning: allowed)
+                      }
+                  }
+                  guard micAllowed else { status = "请在 iPhone 设置中允许越聊使用麦克风"; return }
+                  let speechAllowed: Bool = await withCheckedContinuation { continuation in
+                      SFSpeechRecognizer.requestAuthorization { auth in
+                          continuation.resume(returning: auth == .authorized)
+                      }
+                  }
+                  guard speechAllowed else { status = "请在 iPhone 设置中允许语音识别"; return }
+                  guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: sourceLanguage)), recognizer.isAvailable else {
+                      status = "当前语言的语音识别暂不可用"; return
+                  }
+                  guard recognizer.supportsOnDeviceRecognition else {
+                      status = "当前 iPhone 语言不支持离线识别，已停止，不会回退到云端"; return
+                  }
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: [.duckOthers])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                      let speechRequest = SFSpeechAudioBufferRecognitionRequest()
+                      speechRequest.shouldReportPartialResults = true
+                      speechRequest.requiresOnDeviceRecognition = true
+                      let input = audioEngine.inputNode
+                      input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
+                          speechRequest.append(buffer)
+                      }
+                      audioEngine.prepare()
+                      try audioEngine.start()
+                      request = speechRequest
+                      recognitionTask = recognizer.recognitionTask(with: speechRequest) { result, error in
+                          if let result {
+                              let text = result.bestTranscription.formattedString
+                              Task { @MainActor in
+                                  transcript = text
+                                  debounceTask?.cancel()
+                                  debounceTask = Task {
+                                      try? await Task.sleep(nanoseconds: 650_000_000)
+                                      guard !Task.isCancelled else { return }
+                                      await translateText(text)
+                                  }
+                              }
+                          }
+                          if let error {
+                              Task { @MainActor in
+                                  status = error.localizedDescription
+                                  stopRecognition()
+                              }
+                          }
+                      }
+                      isRecording = true
+                      status = "正在本机识别；不会上传语音"
+                  } catch {
+                      status = "无法启动麦克风：\(error.localizedDescription)"
+                      stopRecognition()
+                  }
+              }
+
+              @MainActor
+              private func stopRecognition() {
+                  if audioEngine.isRunning {
+                      audioEngine.stop()
+                      audioEngine.inputNode.removeTap(onBus: 0)
+                  }
+                  request?.endAudio()
+                  recognitionTask?.cancel()
+                  request = nil
+                  recognitionTask = nil
+                  isRecording = false
+                  try? AVAudioSession.sharedInstance().setActive(false)
+              }
+
+              @MainActor
+              private func translateText(_ text: String) async {
+                  guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        let session = translationSession else { return }
+                  do {
+                      let result = try await session.translate(text)
+                      translated = result.targetText
+                      status = "本机翻译完成 · \(direction)"
+                  } catch {
+                      status = "本地翻译不可用：\(error.localizedDescription)"
+                  }
+              }
+
+              private func speakTranslation() {
+                  guard !translated.isEmpty else { return }
+                  let phrase = AVSpeechUtterance(string: translated)
+                  phrase.voice = AVSpeechSynthesisVoice(language: targetLanguage)
+                  synthesizer.speak(phrase)
+              }
+          }
+
           struct ProfileView: View {
               @AppStorage("nickname") private var nickname = "越聊用户"
               @AppStorage("avatarData") private var avatarData = Data()
@@ -336,7 +508,7 @@ jobs:
                                       Divider().padding(.leading, 64)
                                       Link(destination: URL(string: "https://yueliao.eu.cc/privacy.html")!) { row("隐私说明", "hand.raised.fill", .gray) }
                                       Divider().padding(.leading, 64)
-                                      NavigationLink { Text("越聊 iOS 原生界面工程 0.1\n\n此版本只完成个人页与底部导航。聊天、账号同步、音视频与推送仍待开发。\n\n非已签名安装包。").padding().navigationTitle("关于越聊") } label: { row("关于越聊", "info.circle.fill", .purple) }
+                                      NavigationLink { Text("越聊 iOS 原生界面 0.2\n\n包含群聊、通讯录和本机语音识别与翻译测试。视频通话、对方语音接入、来电推送仍待开发。\n\n此 IPA 未签名，需通过 SideStore 安装签名。").padding().navigationTitle("关于越聊") } label: { row("关于越聊", "info.circle.fill", .purple) }
                                   }.background(.background, in: RoundedRectangle(cornerRadius: 20))
                                   Text("本机资料不会自动同步到网页账号。").font(.footnote).foregroundStyle(.secondary)
                               }.padding(16).background(Color(uiColor: .systemGroupedBackground), in: RoundedRectangle(cornerRadius: 26)).offset(y: -20)
@@ -372,7 +544,7 @@ jobs:
           options:
             bundleIdPrefix: cc.eu.yueliao
             deploymentTarget:
-              iOS: '16.0'
+              iOS: '18.0'
           targets:
             YueLiao:
               type: application
@@ -384,6 +556,8 @@ jobs:
                   SWIFT_VERSION: '5.0'
                   GENERATE_INFOPLIST_FILE: YES
                   INFOPLIST_KEY_CFBundleDisplayName: 越聊
+                  INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在本机识别语音，用于实时字幕和翻译测试。
+                  INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.1.0'
                   CURRENT_PROJECT_VERSION: '1'
