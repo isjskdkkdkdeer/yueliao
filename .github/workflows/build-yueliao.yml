@@ -740,14 +740,16 @@ jobs:
                   do {
                       let speechRequest: SFSpeechAudioBufferRecognitionRequest
                       do {
-                          speechRequest = try startMicrophone(category: .record, mode: .measurement)
+                          // Voice processing is preferable for noisy two-way conversations.
+                          speechRequest = try startMicrophone(category: .playAndRecord, mode: .voiceChat)
                       } catch {
-                          let firstFailure = error
+                          let voiceFailure = error
                           do {
-                              speechRequest = try startMicrophone(category: .playAndRecord, mode: .default)
+                              // Some routes/devices do not support voiceChat mode.
+                              speechRequest = try startMicrophone(category: .record, mode: .measurement)
                           } catch {
                               throw MicrophoneFailure(
-                                  detail: "录音模式：\(firstFailure.localizedDescription)；兼容模式：\(error.localizedDescription)"
+                                  detail: "通话降噪模式：\(voiceFailure.localizedDescription)；原始录音模式：\(error.localizedDescription)"
                               )
                           }
                       }
@@ -805,6 +807,8 @@ jobs:
                       let speechRequest = SFSpeechAudioBufferRecognitionRequest()
                       speechRequest.shouldReportPartialResults = true
                       speechRequest.requiresOnDeviceRecognition = true
+                      speechRequest.taskHint = .dictation
+                      speechRequest.addsPunctuation = true
                       input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
                           speechRequest.append(buffer)
                       }
