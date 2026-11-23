@@ -433,7 +433,7 @@ jobs:
           cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
           import SwiftUI
           import PhotosUI
-          import Translation
+          import WebKit
           import Speech
           import AVFoundation
           import UIKit
@@ -446,15 +446,28 @@ jobs:
               @StateObject private var outbox = GroupOutbox()
               var body: some View {
                   TabView {
+                      YueLiaoWebView()
+                          .tabItem { Label("网页版", systemImage: "globe") }
                       GroupsPage(outbox: outbox)
                           .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
                       PeoplePage(notebook: notebook, chats: false)
                           .tabItem { Label("通讯录", systemImage: "person.2") }
                       LocalTranslationView()
-                          .tabItem { Label("本地翻译", systemImage: "waveform.and.mic") }
+                          .tabItem { Label("语音翻译", systemImage: "waveform.and.mic") }
                       ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
                   }.tint(.blue).task { await outbox.run() }
               }
+          }
+          struct YueLiaoWebView: UIViewRepresentable {
+              func makeUIView(context: Context) -> WKWebView {
+                  let configuration = WKWebViewConfiguration()
+                  configuration.allowsInlineMediaPlayback = true
+                  let webView = WKWebView(frame: .zero, configuration: configuration)
+                  webView.load(URLRequest(url: URL(string: "https://yueliao.eu.cc/")!))
+                  return webView
+              }
+
+              func updateUIView(_ webView: WKWebView, context: Context) {}
           }
           struct PendingView: View {
               let title: String
@@ -478,15 +491,10 @@ jobs:
               @State private var isRecording = false
               @State private var startupID: UUID?
               @State private var tapInstalled = false
-              @State private var configuration = TranslationSession.Configuration(
-                  source: Locale.Language(identifier: "zh-Hans"),
-                  target: Locale.Language(identifier: "vi")
-              )
-              @State private var translationSession: TranslationSession?
+              @State private var translationTask: Task<Void, Never>?
               @State private var audioEngine = AVAudioEngine()
               @State private var request: SFSpeechAudioBufferRecognitionRequest?
               @State private var recognitionTask: SFSpeechRecognitionTask?
-              @State private var debounceTask: Task<Void, Never>?
               @State private var synthesizer = AVSpeechSynthesizer()
 
               private var isStarting: Bool { startupID != nil }
@@ -501,12 +509,14 @@ jobs:
                   NavigationStack {
                       ScrollView {
                           VStack(spacing: 16) {
-                              Text("本地翻译测试").font(.title2.bold())
-                              Text("语音识别和文字翻译在 iPhone 本机运行。此页面只测试本机麦克风，尚未接入通话中的对方声音。播放译声也只在本机播放。")
+                              Text("语音翻译").font(.title2.bold())
+                              Text("iPhone 在本机识别语音。点「联网翻译」后，识别出的文字会发送给在线翻译服务。")
                                   .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                               Button {
                                   sourceLanguage = sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN"
-                                  configuration = makeConfiguration()
+                                  translationTask?.cancel()
+                                  translationTask = nil
+                                  transcript = ""
                                   translated = ""
                               } label: {
                                   Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
@@ -515,7 +525,7 @@ jobs:
                                   Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
                                       .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
                               }
-                              GroupBox("本地翻译") {
+                              GroupBox("联网译文") {
                                   Text(translated.isEmpty ? "翻译结果会显示在这里" : translated)
                                       .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
                               }
@@ -527,34 +537,32 @@ jobs:
                                       Label("播放译声", systemImage: "speaker.wave.2")
                                   }.buttonStyle(.bordered).disabled(translated.isEmpty)
                               }
+                              Button("联网翻译") { submitTranslation() }
+                                  .buttonStyle(.borderedProminent)
+                                  .disabled(isStarting || isRecording || transcript.isEmpty || translationTask != nil)
                               Text(status).font(.footnote).foregroundStyle(.secondary)
                                   .frame(maxWidth: .infinity, alignment: .leading)
                           }
                           .padding(20)
                       }
-                      .navigationTitle("本地翻译")
+                      .navigationTitle("语音翻译")
                       .navigationBarTitleDisplayMode(.inline)
-                      .translationTask(configuration) { session in
-                          translationSession = session
-                          if !transcript.isEmpty { await translateText(transcript) }
+                      .onDisappear {
+                          stopRecognition()
+                          translationTask?.cancel()
+                          translationTask = nil
                       }
-                      .onDisappear { stopRecognition() }
                   }
-              }
-
-              private func makeConfiguration() -> TranslationSession.Configuration {
-                  let from = sourceLanguage == "zh-CN" ? "zh-Hans" : "vi"
-                  let to = sourceLanguage == "zh-CN" ? "vi" : "zh-Hans"
-                  return TranslationSession.Configuration(
-                      source: Locale.Language(identifier: from),
-                      target: Locale.Language(identifier: to)
-                  )
               }
 
               @MainActor
               private func startRecognition() async {
                   guard !isStarting, !isRecording else { return }
                   removeInputTap()
+                  translationTask?.cancel()
+                  translationTask = nil
+                  transcript = ""
+                  translated = ""
 
                   let attempt = UUID()
                   startupID = attempt
@@ -603,12 +611,6 @@ jobs:
                               Task { @MainActor in
                                   guard request === speechRequest else { return }
                                   transcript = text
-                                  debounceTask?.cancel()
-                                  debounceTask = Task {
-                                      try? await Task.sleep(nanoseconds: 650_000_000)
-                                      guard !Task.isCancelled else { return }
-                                      await translateText(text)
-                                  }
                               }
                           }
                           if let error {
@@ -620,7 +622,7 @@ jobs:
                           }
                       }
                       isRecording = true
-                      status = "正在本机识别；不会上传语音"
+                      status = "正在识别；停止后可联网翻译"
                   } catch {
                       status = "无法启动麦克风：\(error.localizedDescription)"
                       stopRecognition()
@@ -697,16 +699,74 @@ jobs:
               }
 
               @MainActor
-              private func translateText(_ text: String) async {
-                  guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                        let session = translationSession else { return }
-                  do {
-                      let result = try await session.translate(text)
-                      translated = result.targetText
-                      status = "本机翻译完成 · \(direction)"
-                  } catch {
-                      status = "本地翻译不可用：\(error.localizedDescription)"
+              private func submitTranslation() {
+                  let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !text.isEmpty, translationTask == nil else { return }
+                  let source = sourceLanguage == "vi-VN" ? "vi" : "zh-CN"
+                  let target = source == "vi" ? "zh-CN" : "vi"
+                  status = "正在联网翻译…"
+                  translated = ""
+                  translationTask = Task {
+                      do {
+                          let result = try await Self.translateOnline(text, source: source, target: target)
+                          try Task.checkCancellation()
+                          translated = result
+                          status = "联网翻译完成 · \(direction)"
+                      } catch {
+                          guard !Task.isCancelled else { return }
+                          status = "联网翻译失败：\(error.localizedDescription)"
+                      }
+                      translationTask = nil
                   }
+              }
+
+              private struct OnlineTranslationResponse: Decodable {
+                  struct TranslationData: Decodable { let translatedText: String }
+                  let responseStatus: Int
+                  let responseData: TranslationData?
+              }
+
+              private static func translateOnline(_ text: String, source: String, target: String) async throws -> String {
+                  var chunks: [String] = []
+                  var current = ""
+                  var bytes = 0
+                  for scalar in text.unicodeScalars {
+                      let piece = String(scalar)
+                      let count = piece.utf8.count
+                      if bytes + count > 450 {
+                          chunks.append(current)
+                          current = ""
+                          bytes = 0
+                      }
+                      current += piece
+                      bytes += count
+                  }
+                  if !current.isEmpty { chunks.append(current) }
+
+                  var translations: [String] = []
+                  for chunk in chunks {
+                      try Task.checkCancellation()
+                      var url = URLComponents()
+                      url.scheme = "https"
+                      url.host = "api.mymemory.translated.net"
+                      url.path = "/get"
+                      url.queryItems = [
+                          URLQueryItem(name: "q", value: chunk),
+                          URLQueryItem(name: "langpair", value: "\(source)|\(target)")
+                      ]
+                      guard let endpoint = url.url else { throw URLError(.badURL) }
+                      let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+                      let (data, response) = try await URLSession.shared.data(for: request)
+                      guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                      let result = try JSONDecoder().decode(OnlineTranslationResponse.self, from: data)
+                      guard result.responseStatus == 200,
+                            let text = result.responseData?.translatedText.trimmingCharacters(in: .whitespacesAndNewlines),
+                            !text.isEmpty, !text.uppercased().hasPrefix("MYMEMORY WARNING") else {
+                          throw MicrophoneFailure(detail: "在线翻译服务暂不可用或额度已用完。")
+                      }
+                      translations.append(text)
+                  }
+                  return translations.joined(separator: target == "vi" ? " " : "")
               }
 
               private func speakTranslation() {
