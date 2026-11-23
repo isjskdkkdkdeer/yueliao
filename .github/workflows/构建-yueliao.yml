@@ -499,39 +499,41 @@ jobs:
 
               var body: some View {
                   NavigationStack {
-                      VStack(spacing: 16) {
-                          Text("本地翻译测试").font(.title2.bold())
-                          Text("语音识别和文字翻译在 iPhone 本机运行。此页面只测试本机麦克风，尚未接入通话中的对方声音。播放译声也只在本机播放。")
-                              .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                          Button {
-                              sourceLanguage = sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN"
-                              configuration = makeConfiguration()
-                              translated = ""
-                          } label: {
-                              Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
-                          }.buttonStyle(.bordered).disabled(isRecording || isStarting)
-                          GroupBox("识别原文") {
-                              Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
-                                  .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                      ScrollView {
+                          VStack(spacing: 16) {
+                              Text("本地翻译测试").font(.title2.bold())
+                              Text("语音识别和文字翻译在 iPhone 本机运行。此页面只测试本机麦克风，尚未接入通话中的对方声音。播放译声也只在本机播放。")
+                                  .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                              Button {
+                                  sourceLanguage = sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN"
+                                  configuration = makeConfiguration()
+                                  translated = ""
+                              } label: {
+                                  Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
+                              }.buttonStyle(.bordered).disabled(isRecording || isStarting)
+                              GroupBox("识别原文") {
+                                  Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
+                                      .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                              }
+                              GroupBox("本地翻译") {
+                                  Text(translated.isEmpty ? "翻译结果会显示在这里" : translated)
+                                      .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                              }
+                              HStack {
+                                  Button(recognitionButtonTitle) {
+                                      if isRecording { stopRecognition() } else { Task { await startRecognition() } }
+                                  }.buttonStyle(.borderedProminent).disabled(isStarting)
+                                  Button { speakTranslation() } label: {
+                                      Label("播放译声", systemImage: "speaker.wave.2")
+                                  }.buttonStyle(.bordered).disabled(translated.isEmpty)
+                              }
+                              Text(status).font(.footnote).foregroundStyle(.secondary)
+                                  .frame(maxWidth: .infinity, alignment: .leading)
                           }
-                          GroupBox("本地翻译") {
-                              Text(translated.isEmpty ? "翻译结果会显示在这里" : translated)
-                                  .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
-                          }
-                          HStack {
-                              Button(recognitionButtonTitle) {
-                                  if isRecording { stopRecognition() } else { Task { await startRecognition() } }
-                              }.buttonStyle(.borderedProminent).disabled(isStarting)
-                              Button { speakTranslation() } label: {
-                                  Label("播放译声", systemImage: "speaker.wave.2")
-                              }.buttonStyle(.bordered).disabled(translated.isEmpty)
-                          }
-                          Text(status).font(.footnote).foregroundStyle(.secondary)
-                              .frame(maxWidth: .infinity, alignment: .leading)
-                          Spacer(minLength: 0)
+                          .padding(20)
                       }
-                      .padding(20)
                       .navigationTitle("本地翻译")
+                      .navigationBarTitleDisplayMode(.inline)
                       .translationTask(configuration) { session in
                           translationSession = session
                           if !transcript.isEmpty { await translateText(transcript) }
