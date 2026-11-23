@@ -1,7 +1,7 @@
 name: Build YueLiao IPA
 on:
   push:
-    paths: ['.github/workflows/build-yueliao.yml']
+    paths: ['.github/workflows/build-yueliao.yml', '.github/workflows/patch-ios.sh']
   workflow_dispatch:
 permissions:
   contents: read
