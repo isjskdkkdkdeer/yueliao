@@ -1026,8 +1026,8 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
           /usr/bin/ditto -c -k --keepParent Payload YueLiao.ipa
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: YueLiao-SideStore
           path: native-ios/YueLiao.ipa
+          archive: false
           if-no-files-found: error
