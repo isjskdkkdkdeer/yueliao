@@ -8,11 +8,12 @@ permissions:
 jobs:
   ipa:
     runs-on: macos-15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - run: |
           set -eu
-          command -v xcodegen || brew install xcodegen
+          if ! command -v xcodegen >/dev/null 2>&1; then HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen; fi
           mkdir -p native-ios/YueLiao
           cat > native-ios/YueLiao/Groups.swift <<'YUELIAO_GROUPS'
           import SwiftUI
@@ -1177,7 +1178,17 @@ jobs:
           cd native-ios
           bash ../.github/workflows/patch-ios.sh pre
           xcodegen generate
-          xcodebuild -project YueLiao.xcodeproj -scheme YueLiao -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+          echo "::group::Xcode build"
+          set +e
+          xcodebuild -project YueLiao.xcodeproj -scheme YueLiao -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build > xcodebuild.log 2>&1
+          build_status=$?
+          set -e
+          grep -E 'error:|warning:|BUILD (SUCCEEDED|FAILED)|SwiftCompile|CompileSwift' xcodebuild.log | tail -100 || true
+          echo "::endgroup::"
+          if [ "$build_status" -ne 0 ]; then
+            tail -180 xcodebuild.log
+            exit "$build_status"
+          fi
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
@@ -1188,3 +1199,11 @@ jobs:
           path: native-ios/YueLiao.ipa
           archive: false
           if-no-files-found: error
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yueliao-build-log
+          path: native-ios/xcodebuild.log
+          if-no-files-found: ignore
