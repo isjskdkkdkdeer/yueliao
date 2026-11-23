@@ -585,11 +585,34 @@ jobs:
           import UIKit
 
           @main struct YueLiaoApp: App {
+              @StateObject private var outbox = GroupOutbox()
+              @StateObject private var notebook = Notebook()
+
+              init() {
+                  let appearance = UITabBarAppearance()
+                  appearance.configureWithOpaqueBackground()
+                  appearance.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.055, alpha: 1)
+                  UITabBar.appearance().standardAppearance = appearance
+                  UITabBar.appearance().scrollEdgeAppearance = appearance
+              }
+
               var body: some Scene {
                   WindowGroup {
-                      YueLiaoAppleTranslationWebView()
-                          .background(Color(red: 0.035, green: 0.043, blue: 0.055).ignoresSafeArea())
-                          .preferredColorScheme(.dark)
+                      TabView {
+                          GroupsPage(outbox: outbox)
+                              .tabItem { Label("群聊", systemImage: "bubble.left.and.bubble.right.fill") }
+                          PeoplePage(notebook: notebook, chats: false)
+                              .tabItem { Label("联系人", systemImage: "person.2.fill") }
+                          LocalTranslationView()
+                              .tabItem { Label("互译", systemImage: "character.bubble.fill") }
+                          YueLiaoAppleTranslationWebView()
+                              .tabItem { Label("越聊网页", systemImage: "globe") }
+                          ProfileView()
+                              .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                      }
+                      .tint(Color(red: 0.847, green: 0.710, blue: 0.427))
+                      .preferredColorScheme(.dark)
+                      .task { await outbox.run() }
                   }
               }
           }
@@ -983,6 +1006,115 @@ jobs:
               }
           }
           YUELIAO_SOURCE
+          cat > native-ios/YueLiao/LocalTranslationView.swift <<'YUELIAO_TRANSLATION'
+          import SwiftUI
+          import Translation
+
+          private enum LocalDirection: String, CaseIterable {
+              case zhToVi, viToZh
+              var title: String { self == .zhToVi ? "中 → 越" : "越 → 中" }
+              var source: Locale.Language {
+                  Locale.Language(identifier: self == .zhToVi ? "zh-Hans" : "vi")
+              }
+              var target: Locale.Language {
+                  Locale.Language(identifier: self == .zhToVi ? "vi" : "zh-Hans")
+              }
+              var placeholder: String {
+                  self == .zhToVi ? "输入中文" : "Nhập tiếng Việt"
+              }
+          }
+
+          private struct LocalTranslationRecord: Identifiable {
+              let id = UUID()
+              let source: String
+              let target: String
+              let direction: LocalDirection
+          }
+
+          struct LocalTranslationView: View {
+              @State private var input = ""
+              @State private var direction: LocalDirection = .zhToVi
+              @State private var history: [LocalTranslationRecord] = []
+              @State private var config: TranslationSession.Configuration?
+              @State private var request: (id: UUID, text: String, direction: LocalDirection)?
+              @State private var busy = false
+              @State private var notice = ""
+
+              var body: some View {
+                  NavigationStack {
+                      VStack(spacing: 12) {
+                          HStack {
+                              Text(direction.title).font(.headline)
+                              Spacer()
+                              Button("切换方向") {
+                                  guard !busy else { return }
+                                  direction = direction == .zhToVi ? .viToZh : .zhToVi
+                                  config = nil
+                              }
+                              .disabled(busy)
+                          }
+                          .padding(.horizontal)
+
+                          ScrollView {
+                              LazyVStack(alignment: .leading, spacing: 12) {
+                                  ForEach(history) { record in
+                                      VStack(alignment: .leading, spacing: 8) {
+                                          Text(record.direction.title).font(.caption).foregroundStyle(.secondary)
+                                          Text(record.source)
+                                          Divider()
+                                          Text(record.target).foregroundStyle(.yellow)
+                                      }
+                                      .frame(maxWidth: .infinity, alignment: .leading)
+                                      .padding()
+                                      .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                  }
+                              }.padding()
+                          }
+                          if !notice.isEmpty {
+                              Text(notice).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                          }
+                          HStack {
+                              TextField(direction.placeholder, text: $input, axis: .vertical)
+                                  .lineLimit(1...4)
+                                  .textFieldStyle(.roundedBorder)
+                              Button(busy ? "翻译中" : "翻译") { submit() }
+                                  .disabled(busy || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                          }.padding()
+                      }
+                      .background(Color(red: 0.035, green: 0.043, blue: 0.055))
+                      .navigationTitle("中越互译")
+                      .translationTask(config) { session in
+                          guard let current = request else { return }
+                          do {
+                              let response = try await session.translate(current.text)
+                              guard request?.id == current.id else { return }
+                              history.insert(LocalTranslationRecord(source: current.text, target: response.targetText, direction: current.direction), at: 0)
+                              notice = ""
+                          } catch {
+                              if request?.id == current.id {
+                                  notice = "翻译失败：\\(error.localizedDescription)"
+                              }
+                          }
+                          if request?.id == current.id {
+                              request = nil
+                              busy = false
+                          }
+                      }
+                  }
+              }
+
+              private func submit() {
+                  let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !text.isEmpty, !busy else { return }
+                  busy = true
+                  notice = ""
+                  request = (UUID(), text, direction)
+                  input = ""
+                  let next = TranslationSession.Configuration(source: direction.source, target: direction.target)
+                  config = next
+              }
+          }
+          YUELIAO_TRANSLATION
           cat > native-ios/project.yml <<'YUELIAO_SOURCE'
           name: YueLiao
           options:
@@ -1003,8 +1135,8 @@ jobs:
                   INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在本机识别语音，用于实时字幕和翻译测试。
                   INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
-                  MARKETING_VERSION: '0.1.0'
-                  CURRENT_PROJECT_VERSION: '1'
+                  MARKETING_VERSION: '0.2.0'
+                  CURRENT_PROJECT_VERSION: '2'
               scheme:
                 gatherCoverageData: false
           YUELIAO_SOURCE
