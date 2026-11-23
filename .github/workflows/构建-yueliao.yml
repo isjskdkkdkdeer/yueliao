@@ -581,18 +581,19 @@ jobs:
                       status = "当前 iPhone 语言不支持离线识别，已停止，不会回退到云端"; return
                   }
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: [.duckOthers])
-                      try AVAudioSession.sharedInstance().setActive(true)
-                      let speechRequest = SFSpeechAudioBufferRecognitionRequest()
-                      speechRequest.shouldReportPartialResults = true
-                      speechRequest.requiresOnDeviceRecognition = true
-                      let input = audioEngine.inputNode
-                      input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
-                          speechRequest.append(buffer)
+                      let speechRequest: SFSpeechAudioBufferRecognitionRequest
+                      do {
+                          speechRequest = try startMicrophone(category: .record, mode: .measurement)
+                      } catch {
+                          let firstFailure = error
+                          do {
+                              speechRequest = try startMicrophone(category: .playAndRecord, mode: .default)
+                          } catch {
+                              throw MicrophoneFailure(
+                                  detail: "录音模式：\(firstFailure.localizedDescription)；兼容模式：\(error.localizedDescription)"
+                              )
+                          }
                       }
-                      tapInstalled = true
-                      audioEngine.prepare()
-                      try audioEngine.start()
                       request = speechRequest
                       recognitionTask = recognizer.recognitionTask(with: speechRequest) { result, error in
                           if let result {
@@ -624,17 +625,66 @@ jobs:
                   }
               }
 
+              private struct MicrophoneFailure: LocalizedError {
+                  let detail: String
+                  var errorDescription: String? { detail }
+              }
+
+              @MainActor
+              private func startMicrophone(
+                  category: AVAudioSession.Category,
+                  mode: AVAudioSession.Mode
+              ) throws -> SFSpeechAudioBufferRecognitionRequest {
+                  let session = AVAudioSession.sharedInstance()
+                  var stage = "配置音频会话"
+                  do {
+                      try session.setCategory(category, mode: mode)
+                      stage = "激活音频会话"
+                      try session.setActive(true)
+
+                      audioEngine = AVAudioEngine()
+                      let input = audioEngine.inputNode
+                      let hardwareFormat = input.inputFormat(forBus: 0)
+                      let tapFormat = input.outputFormat(forBus: 0)
+                      guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0,
+                            tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
+                          throw MicrophoneFailure(detail: "当前没有可用的麦克风输入")
+                      }
+
+                      let speechRequest = SFSpeechAudioBufferRecognitionRequest()
+                      speechRequest.shouldReportPartialResults = true
+                      speechRequest.requiresOnDeviceRecognition = true
+                      input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                          speechRequest.append(buffer)
+                      }
+                      tapInstalled = true
+                      stage = "启动音频引擎"
+                      audioEngine.prepare()
+                      try audioEngine.start()
+                      return speechRequest
+                  } catch {
+                      releaseMicrophone()
+                      let reason = error as NSError
+                      throw MicrophoneFailure(detail: "\(stage)失败：\(reason.localizedDescription) [\(reason.code)]")
+                  }
+              }
+
               @MainActor
               private func stopRecognition() {
                   startupID = nil
-                  if audioEngine.isRunning { audioEngine.stop() }
-                  removeInputTap()
+                  releaseMicrophone()
                   request?.endAudio()
                   recognitionTask?.cancel()
                   request = nil
                   recognitionTask = nil
                   isRecording = false
-                  try? AVAudioSession.sharedInstance().setActive(false)
+              }
+
+              @MainActor
+              private func releaseMicrophone() {
+                  if audioEngine.isRunning { audioEngine.stop() }
+                  removeInputTap()
+                  try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
               }
 
               @MainActor
