@@ -14,6 +14,336 @@ jobs:
           set -eu
           command -v xcodegen || brew install xcodegen
           mkdir -p native-ios/YueLiao
+          cat > native-ios/YueLiao/Groups.swift <<'YUELIAO_GROUPS'
+          import SwiftUI
+          import CryptoKit
+          import Security
+          import NaturalLanguage
+          import Translation
+
+          struct ChatRoom: Codable, Identifiable {
+              let id, name, code: String
+          }
+          struct RoomMessage: Codable, Identifiable {
+              let seq: Int
+              let text, senderName: String
+              let lang: String?
+              let out: Bool
+              var id: Int { seq }
+          }
+          struct RoomList: Decodable { let groups: [ChatRoom] }
+          struct RoomResult: Decodable { let group: ChatRoom }
+          struct MessageList: Decodable { let messages: [RoomMessage] }
+          struct Registered: Decodable { let cloudId: String }
+          struct Sent: Decodable { let ok: Bool }
+
+          enum RoomService {
+              static func token() throws -> String {
+                  let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "cc.eu.yueliao.mailbox", kSecAttrAccount as String: "device"]
+                  var lookup = query
+                  lookup[kSecReturnData as String] = true
+                  var result: CFTypeRef?
+                  let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+                  if status == errSecSuccess, let bytes = result as? Data { return bytes.map { String(format: "%02x", $0) }.joined() }
+                  guard status == errSecItemNotFound else { throw URLError(.userAuthenticationRequired) }
+                  let bytes = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+                  var item = query
+                  item[kSecValueData as String] = bytes
+                  item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                  let added = SecItemAdd(item as CFDictionary, nil)
+                  guard added == errSecSuccess || added == errSecDuplicateItem else { throw URLError(.cannotCreateFile) }
+                  return try token()
+              }
+              static func post<T: Decodable>(_ path: String, _ body: [String: Any], as: T.Type) async throws -> T {
+                  var request = URLRequest(url: URL(string: "https://yueliao.eu.cc/api/mailbox/" + path)!)
+                  request.httpMethod = "POST"
+                  request.timeoutInterval = 15
+                  request.setValue("Bearer " + (try token()), forHTTPHeaderField: "Authorization")
+                  request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                  request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                  let (data, response) = try await URLSession.shared.data(for: request)
+                  guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                      let error = try? JSONDecoder().decode([String:String].self, from: data)
+                      throw NSError(domain: "YueLiao", code: 1, userInfo: [NSLocalizedDescriptionKey: error?["error"] ?? "群聊服务暂不可用"])
+                  }
+                  return try JSONDecoder().decode(T.self, from: data)
+              }
+          }
+          struct GroupsPage: View {
+              @ObservedObject var outbox: GroupOutbox
+              @AppStorage("cachedGroupRooms") private var cachedRooms = Data()
+              @AppStorage("nickname") private var nick = "越聊用户"
+              @AppStorage("language") private var language = "中文"
+              @State private var rooms: [ChatRoom] = []
+              @State private var value = ""
+              @State private var notice = ""
+              @State private var ready = false
+              @State private var busy = false
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          Section("我的群聊") {
+                              ForEach(rooms) { room in NavigationLink(room.name) { ThreadPage(room: room, outbox: outbox) } }
+                          }
+                          Section("创建或加入") {
+                              TextField("群名或群邀请码", text: $value)
+                              Button("创建群聊") { change(true) }
+                              Button("用邀请码加入") { change(false) }
+                          }.disabled(!ready || busy)
+                          if !notice.isEmpty { Text(notice).foregroundStyle(.secondary) }
+                      }.navigationTitle("聊天").task { await load() }.refreshable { await load() }
+                  }
+              }
+              func load() async {
+                  if rooms.isEmpty, let cached = try? JSONDecoder().decode([ChatRoom].self, from: cachedRooms) {
+                      rooms = cached
+                  }
+                  do {
+                      let device = SHA256.hash(data: Data((try RoomService.token()).utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+                      _ = try await RoomService.post("register", ["id":"ios-" + device,"name":nick,"language":language == "中文" ? "zh" : "vi"], as: Registered.self)
+                      rooms = try await RoomService.post("groups-list", [:], as: RoomList.self).groups
+                      cacheRooms()
+                      ready = true
+                      notice = ""
+                  } catch { notice = error.localizedDescription }
+              }
+              private func cacheRooms() {
+                  if let data = try? JSONEncoder().encode(rooms) { cachedRooms = data }
+              }
+              func change(_ create: Bool) {
+                  let input = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !busy, !input.isEmpty else { return }
+                  busy = true
+                  Task {
+                      defer { busy = false }
+                      do {
+                          let room = try await RoomService.post(create ? "groups-create" : "groups-join", [create ? "name" : "code":input], as: RoomResult.self).group
+                          if !rooms.contains(where: { $0.id == room.id }) { rooms.append(room) }
+                          cacheRooms()
+                          value = ""; notice = ""
+                      } catch { notice = error.localizedDescription }
+                  }
+              }
+          }
+          enum ChatLanguage: String, Codable {
+              case chinese = "zh"
+              case vietnamese = "vi"
+
+              var locale: Locale.Language {
+                  Locale.Language(identifier: self == .chinese ? "zh-Hans" : "vi")
+              }
+
+              var opposite: Self { self == .chinese ? .vietnamese : .chinese }
+
+              static func detect(_ text: String) -> Self? {
+                  if text.unicodeScalars.contains(where: { $0.properties.isIdeographic }) { return .chinese }
+                  if NLLanguageRecognizer.dominantLanguage(for: text) == .vietnamese { return .vietnamese }
+                  return nil
+              }
+          }
+
+          struct ChatTranslation: View {
+              let text: String
+              let source: ChatLanguage
+              let target: ChatLanguage
+              var preview = false
+              @State private var result = ""
+
+              var body: some View {
+                  if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, source != target {
+                      VStack(alignment: .leading) {
+                          if !result.isEmpty {
+                              Text(result).font(.caption).foregroundStyle(.secondary)
+                          }
+                      }
+                      .translationTask(TranslationSession.Configuration(source: source.locale, target: target.locale)) { session in
+                          do {
+                              if preview { try await Task.sleep(for: .milliseconds(350)) }
+                              let status = await LanguageAvailability().status(from: source.locale, to: target.locale)
+                              try Task.checkCancellation()
+                              switch status {
+                              case .installed:
+                                  let response = try await session.translate(text)
+                                  try Task.checkCancellation()
+                                  result = (preview ? "本机预览：" : "本机译文：") + response.targetText
+                              case .supported:
+                                  result = "中越翻译语言包未下载，请在系统翻译设置中下载。"
+                              case .unsupported:
+                                  result = "当前设备或系统不支持中越本机翻译。"
+                              @unknown default:
+                                  result = "中越翻译语言包暂不可用。"
+                              }
+                          } catch {
+                              if !Task.isCancelled { result = "本机翻译暂不可用，请检查中越翻译语言包。" }
+                          }
+                      }
+                  }
+              }
+          }
+
+          struct PendingGroupMessage: Codable, Identifiable {
+              let id: UUID
+              let roomID: String
+              let text: String
+              let language: ChatLanguage
+          }
+
+          @MainActor
+          final class GroupOutbox: ObservableObject {
+              @Published private(set) var pending: [PendingGroupMessage] = []
+              @Published private(set) var notice = ""
+              @Published private(set) var deliveryVersion = 0
+              private let file: URL
+              private var loaded = false
+              private var sending = false
+
+              init() {
+                  file = URL.applicationSupportDirectory.appendingPathComponent("group-outbox.json")
+                  do {
+                      do {
+                          pending = try JSONDecoder().decode([PendingGroupMessage].self, from: Data(contentsOf: file))
+                      } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                          pending = []
+                      }
+                      loaded = true
+                  } catch {
+                      notice = "无法读取本机发送队列。"
+                  }
+              }
+
+              func enqueue(roomID: String, text: String, language: ChatLanguage) -> Bool {
+                  guard loaded else { return false }
+                  let message = PendingGroupMessage(id: UUID(), roomID: roomID, text: text, language: language)
+                  do {
+                      try save(pending + [message])
+                      notice = ""
+                      return true
+                  } catch {
+                      notice = "无法保存消息，草稿仍保留。"
+                      return false
+                  }
+              }
+
+              private func save(_ messages: [PendingGroupMessage]) throws {
+                  try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                  try JSONEncoder().encode(messages).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                  pending = messages
+              }
+
+              func retry() async {
+                  guard loaded, !sending else { return }
+                  sending = true
+                  defer { sending = false }
+
+                  // Retain the same mailbox message ID across retries and app launches.
+                  for message in pending {
+                      guard !Task.isCancelled else { return }
+                      do {
+                          let payload = ["id": message.id.uuidString, "text": message.text, "lang": message.language.rawValue]
+                          let response = try await RoomService.post("groups-send", ["groupId": message.roomID, "message": payload], as: Sent.self)
+                          guard response.ok else { throw URLError(.badServerResponse) }
+                          try save(pending.filter { $0.id != message.id })
+                          deliveryVersion += 1
+                          notice = ""
+                      } catch {
+                          if !Task.isCancelled { notice = "有消息等待发送，应用将自动重试。" }
+                          if error is URLError { return }
+                      }
+                  }
+              }
+
+              func run() async {
+                  while !Task.isCancelled {
+                      await retry()
+                      do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                  }
+              }
+          }
+
+          struct ThreadPage: View {
+              let room: ChatRoom
+              @ObservedObject var outbox: GroupOutbox
+              @State private var messages: [RoomMessage] = []
+              @State private var draft = ""
+              @State private var notice = ""
+              @State private var refreshing = false
+              @AppStorage("language") private var language = "中文"
+
+              private var preferredLanguage: ChatLanguage { language == "中文" ? .chinese : .vietnamese }
+              private var draftLanguage: ChatLanguage { ChatLanguage.detect(draft) ?? preferredLanguage }
+              private var queued: [PendingGroupMessage] { outbox.pending.filter { $0.roomID == room.id } }
+
+              var body: some View {
+                  VStack {
+                      ShareLink("分享群邀请码", item: room.code)
+                      List {
+                          ForEach(messages) { message in
+                              let source = message.lang.flatMap(ChatLanguage.init(rawValue:))
+                                  ?? ChatLanguage.detect(message.text)
+                                  ?? (message.out ? preferredLanguage : preferredLanguage.opposite)
+                              let target = message.out ? source.opposite : preferredLanguage
+                              VStack(alignment: .leading) {
+                                  Text(message.out ? "我" : message.senderName).font(.caption).foregroundStyle(.secondary)
+                                  Text(message.text)
+                                  ChatTranslation(text: message.text, source: source, target: target)
+                                      .id(target)
+                              }
+                          }
+                          ForEach(queued) { message in
+                              VStack(alignment: .leading) {
+                                  Text(message.text)
+                                  Text("等待发送 · 已保存在本机").font(.caption).foregroundStyle(.secondary)
+                                  ChatTranslation(text: message.text, source: message.language, target: message.language.opposite)
+                              }
+                          }
+                      }
+                      if !notice.isEmpty { Text(notice).font(.caption) }
+                      if !outbox.notice.isEmpty { Text(outbox.notice).font(.caption) }
+                      ChatTranslation(text: draft, source: draftLanguage, target: draftLanguage.opposite, preview: true)
+                          .id(PreviewIdentity(text: draft, language: draftLanguage))
+                      HStack {
+                          TextField("输入消息", text: $draft).textFieldStyle(.roundedBorder)
+                          Button("发送") { submit() }
+                              .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 450)
+                      }.padding()
+                  }
+                  .navigationTitle(room.name)
+                  .task {
+                      while !Task.isCancelled {
+                          await refresh()
+                          do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                      }
+                  }
+                  .onChange(of: outbox.deliveryVersion) { _, _ in Task { await refresh() } }
+              }
+
+              private struct PreviewIdentity: Hashable {
+                  let text: String
+                  let language: ChatLanguage
+              }
+
+              private func refresh() async {
+                  guard !refreshing else { return }
+                  refreshing = true
+                  defer { refreshing = false }
+                  do {
+                      let batch = try await RoomService.post("groups-history", ["groupId": room.id, "after": messages.last?.seq ?? 0], as: MessageList.self).messages
+                      var seen = Set(messages.map(\.seq))
+                      messages += batch.filter { seen.insert($0.seq).inserted }
+                      messages.sort { $0.seq < $1.seq }
+                      notice = ""
+                  } catch {
+                      if !Task.isCancelled { notice = error.localizedDescription }
+                  }
+              }
+
+              private func submit() {
+                  guard outbox.enqueue(roomID: room.id, text: draft, language: draftLanguage) else { return }
+                  draft = ""
+                  Task { await outbox.retry() }
+              }
+          }
+          YUELIAO_GROUPS
           cat > native-ios/YueLiao/PeoplePage.swift <<'YUELIAO_SOURCE'
           import SwiftUI
 
@@ -100,25 +430,167 @@ jobs:
               }
           }
           YUELIAO_SOURCE
+          cat > native-ios/YueLiao/AppleTranslationBridge.swift <<'YUELIAO_BRIDGE'
+          import Foundation
+          import SwiftUI
+          import Translation
+          import WebKit
+
+          // Use YueLiaoAppleTranslationWebView() in the existing SwiftUI tab.
+          // UIKit can host the same view with UIHostingController(rootView: ...).
+          @available(iOS 18.0, *)
+          struct YueLiaoAppleTranslationWebView: View {
+              @StateObject private var bridge = AppleTranslationBridge()
+
+              var body: some View {
+                  BridgeWebView(bridge: bridge)
+                      .background {
+                          if let request = bridge.current {
+                              Color.clear
+                                  .frame(width: 0, height: 0)
+                                  .translationTask(request.configuration) { session in
+                                      await bridge.translate(request, using: session)
+                                  }
+                                  .id(request.id)
+                          }
+                      }
+              }
+
+              private struct BridgeWebView: UIViewRepresentable {
+                  let bridge: AppleTranslationBridge
+
+                  func makeUIView(context: Context) -> WKWebView {
+                      let configuration = WKWebViewConfiguration()
+                      configuration.allowsInlineMediaPlayback = true
+                      configuration.userContentController.add(bridge, name: "appleTranslate")
+                      let webView = WKWebView(frame: .zero, configuration: configuration)
+                      webView.load(URLRequest(url: AppleTranslationBridge.site))
+                      return webView
+                  }
+
+                  func updateUIView(_ webView: WKWebView, context: Context) {}
+
+                  static func dismantleUIView(_ webView: WKWebView, coordinator: ()) {
+                      webView.configuration.userContentController.removeScriptMessageHandler(forName: "appleTranslate")
+                  }
+              }
+          }
+
+          @available(iOS 18.0, *)
+          @MainActor
+          private final class AppleTranslationBridge: NSObject, ObservableObject, WKScriptMessageHandler {
+              static let site = URL(string: "https://yueliao.eu.cc/")!
+
+              struct Request {
+                  let id: String
+                  let text: String
+                  let source: Locale.Language
+                  let target: Locale.Language
+                  let frame: WKFrameInfo
+
+                  var configuration: TranslationSession.Configuration {
+                      .init(source: source, target: target)
+                  }
+              }
+
+              @Published private(set) var current: Request?
+              private var pending: [Request] = []
+              private var translating = false
+              private weak var webView: WKWebView?
+
+              func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+                  let frame = message.frameInfo
+                  let origin = frame.securityOrigin
+                  guard message.name == "appleTranslate", frame.isMainFrame,
+                        origin.protocol == "https", origin.host == Self.site.host,
+                        origin.port == 0 || origin.port == 443,
+                        let webView = message.webView,
+                        let body = message.body as? [String: Any],
+                        let id = body["requestId"] as? String, UUID(uuidString: id) != nil else { return }
+                  self.webView = webView
+
+                  guard let rawText = body["sourceText"] as? String,
+                        let from = body["fromLang"] as? String, let to = body["toLang"] as? String,
+                        let source = Self.language(from), let target = Self.language(to), source != target else {
+                      reply(id, frame: frame, error: "请选择中越互译方向。")
+                      return
+                  }
+                  let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !text.isEmpty, text.unicodeScalars.count <= 450 else {
+                      reply(id, frame: frame, error: "翻译文字长度须在 1 到 450 字之间。")
+                      return
+                  }
+                  guard pending.count < 8 else {
+                      reply(id, frame: frame, error: "本机翻译请求过多，请稍后重试。")
+                      return
+                  }
+                  let request = Request(id: id, text: text, source: source, target: target, frame: frame)
+                  if current == nil { current = request } else { pending.append(request) }
+              }
+
+              func translate(_ request: Request, using session: TranslationSession) async {
+                  guard current?.id == request.id, !translating else { return }
+                  translating = true
+                  defer {
+                      translating = false
+                      current = pending.isEmpty ? nil : pending.removeFirst()
+                  }
+                  let availability = await LanguageAvailability().status(from: request.source, to: request.target)
+                  guard !Task.isCancelled else { return }
+                  guard availability == .installed else {
+                      let error = availability == .supported
+                          ? "请先在系统中下载中越翻译语言包，再重试。"
+                          : "此设备的 Apple Translation 暂不支持该中越翻译方向。"
+                      reply(request.id, frame: request.frame, error: error)
+                      return
+                  }
+                  do {
+                      let result = try await session.translate(request.text)
+                      try Task.checkCancellation()
+                      reply(request.id, frame: request.frame, text: result.targetText)
+                  } catch {
+                      if !Task.isCancelled {
+                          reply(request.id, frame: request.frame, error: "Apple 本机翻译失败，请重试。")
+                      }
+                  }
+              }
+
+              private static func language(_ code: String) -> Locale.Language? {
+                  switch code {
+                  case "zh", "zh-CN", "zh-Hans": return Locale.Language(identifier: "zh-Hans")
+                  case "vi", "vi-VN": return Locale.Language(identifier: "vi")
+                  default: return nil
+                  }
+              }
+
+              private func reply(_ id: String, frame: WKFrameInfo, text: String? = nil, error: String? = nil) {
+                  let arguments: [String: Any] = [
+                      "requestId": id,
+                      "translatedText": text.map { $0 as Any } ?? NSNull(),
+                      "error": error.map { $0 as Any } ?? NSNull(),
+                  ]
+                  webView?.callAsyncJavaScript(
+                      "window.__onAppleTranslateResult?.(requestId, translatedText, error)",
+                      arguments: arguments, in: frame, in: .page, completionHandler: { _ in }
+                  )
+              }
+          }
+          YUELIAO_BRIDGE
           cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
           import SwiftUI
           import PhotosUI
+          import WebKit
+          import Speech
+          import AVFoundation
+          import UIKit
 
           @main struct YueLiaoApp: App {
-              var body: some Scene { WindowGroup { RootView() } }
-          }
-          struct RootView: View {
-              @StateObject private var notebook = Notebook()
-              var body: some View {
-                  TabView {
-                      PeoplePage(notebook: notebook, chats: true)
-                          .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
-                      PeoplePage(notebook: notebook, chats: false)
-                          .tabItem { Label("通讯录", systemImage: "person.2") }
-                      PendingView(title: "通话", detail: "原生音视频、来电推送与实时字幕尚未接入。", symbol: "video")
-                          .tabItem { Label("通话", systemImage: "video") }
-                      ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
-                  }.tint(.blue)
+              var body: some Scene {
+                  WindowGroup {
+                      YueLiaoAppleTranslationWebView()
+                          .background(Color(red: 0.035, green: 0.043, blue: 0.055).ignoresSafeArea())
+                          .preferredColorScheme(.dark)
+                  }
               }
           }
           struct PendingView: View {
@@ -135,6 +607,300 @@ jobs:
                   }
               }
           }
+          struct LocalTranslationView: View {
+              @State private var sourceLanguage = "zh-CN"
+              @State private var transcript = ""
+              @State private var translated = ""
+              @State private var status = "点击开始，用本机麦克风说话"
+              @State private var isRecording = false
+              @State private var startupID: UUID?
+              @State private var tapInstalled = false
+              @State private var translationTask: Task<Void, Never>?
+              @State private var audioEngine = AVAudioEngine()
+              @State private var request: SFSpeechAudioBufferRecognitionRequest?
+              @State private var recognitionTask: SFSpeechRecognitionTask?
+              @State private var synthesizer = AVSpeechSynthesizer()
+
+              private var isStarting: Bool { startupID != nil }
+              private var recognitionButtonTitle: String {
+                  if isStarting { return "正在启动…" }
+                  return isRecording ? "停止识别" : "开始本地识别"
+              }
+              private var targetLanguage: String { sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN" }
+              private var direction: String { sourceLanguage == "zh-CN" ? "中文 → 越南语" : "越南语 → 中文" }
+
+              var body: some View {
+                  NavigationStack {
+                      ScrollView {
+                          VStack(spacing: 16) {
+                              Text("语音翻译").font(.title2.bold())
+                              Text("iPhone 在本机识别语音。点「联网翻译」后，识别出的文字会发送给在线翻译服务。")
+                                  .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                              Button {
+                                  sourceLanguage = sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN"
+                                  translationTask?.cancel()
+                                  translationTask = nil
+                                  transcript = ""
+                                  translated = ""
+                              } label: {
+                                  Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
+                              }.buttonStyle(.bordered).disabled(isRecording || isStarting)
+                              GroupBox("识别原文") {
+                                  Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
+                                      .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                              }
+                              GroupBox("联网译文") {
+                                  Text(translated.isEmpty ? "翻译结果会显示在这里" : translated)
+                                      .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
+                              }
+                              HStack {
+                                  Button(recognitionButtonTitle) {
+                                      if isRecording { stopRecognition() } else { Task { await startRecognition() } }
+                                  }.buttonStyle(.borderedProminent).disabled(isStarting)
+                                  Button { speakTranslation() } label: {
+                                      Label("播放译声", systemImage: "speaker.wave.2")
+                                  }.buttonStyle(.bordered).disabled(translated.isEmpty)
+                              }
+                              Button("联网翻译") { submitTranslation() }
+                                  .buttonStyle(.borderedProminent)
+                                  .disabled(isStarting || isRecording || transcript.isEmpty || translationTask != nil)
+                              Text(status).font(.footnote).foregroundStyle(.secondary)
+                                  .frame(maxWidth: .infinity, alignment: .leading)
+                          }
+                          .padding(20)
+                      }
+                      .navigationTitle("语音翻译")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .onDisappear {
+                          stopRecognition()
+                          translationTask?.cancel()
+                          translationTask = nil
+                      }
+                  }
+              }
+
+              @MainActor
+              private func startRecognition() async {
+                  guard !isStarting, !isRecording else { return }
+                  removeInputTap()
+                  translationTask?.cancel()
+                  translationTask = nil
+                  transcript = ""
+                  translated = ""
+
+                  let attempt = UUID()
+                  startupID = attempt
+                  defer {
+                      if startupID == attempt { startupID = nil }
+                  }
+
+                  let micAllowed: Bool = await withCheckedContinuation { continuation in
+                      AVAudioSession.sharedInstance().requestRecordPermission { allowed in
+                          continuation.resume(returning: allowed)
+                      }
+                  }
+                  guard startupID == attempt else { return }
+                  guard micAllowed else { status = "请在 iPhone 设置中允许越聊使用麦克风"; return }
+                  let speechAllowed: Bool = await withCheckedContinuation { continuation in
+                      SFSpeechRecognizer.requestAuthorization { auth in
+                          continuation.resume(returning: auth == .authorized)
+                      }
+                  }
+                  guard startupID == attempt else { return }
+                  guard speechAllowed else { status = "请在 iPhone 设置中允许语音识别"; return }
+                  guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: sourceLanguage)), recognizer.isAvailable else {
+                      status = "当前语言的语音识别暂不可用"; return
+                  }
+                  guard recognizer.supportsOnDeviceRecognition else {
+                      status = "当前 iPhone 语言不支持离线识别，已停止，不会回退到云端"; return
+                  }
+                  do {
+                      let speechRequest: SFSpeechAudioBufferRecognitionRequest
+                      do {
+                          speechRequest = try startMicrophone(category: .record, mode: .measurement)
+                      } catch {
+                          let firstFailure = error
+                          do {
+                              speechRequest = try startMicrophone(category: .playAndRecord, mode: .default)
+                          } catch {
+                              throw MicrophoneFailure(
+                                  detail: "录音模式：\(firstFailure.localizedDescription)；兼容模式：\(error.localizedDescription)"
+                              )
+                          }
+                      }
+                      request = speechRequest
+                      recognitionTask = recognizer.recognitionTask(with: speechRequest) { result, error in
+                          if let result {
+                              let text = result.bestTranscription.formattedString
+                              Task { @MainActor in
+                                  guard request === speechRequest else { return }
+                                  transcript = text
+                              }
+                          }
+                          if let error {
+                              Task { @MainActor in
+                                  guard request === speechRequest else { return }
+                                  status = error.localizedDescription
+                                  stopRecognition()
+                              }
+                          }
+                      }
+                      isRecording = true
+                      status = "正在识别；停止后可联网翻译"
+                  } catch {
+                      status = "无法启动麦克风：\(error.localizedDescription)"
+                      stopRecognition()
+                  }
+              }
+
+              private struct MicrophoneFailure: LocalizedError {
+                  let detail: String
+                  var errorDescription: String? { detail }
+              }
+
+              @MainActor
+              private func startMicrophone(
+                  category: AVAudioSession.Category,
+                  mode: AVAudioSession.Mode
+              ) throws -> SFSpeechAudioBufferRecognitionRequest {
+                  let session = AVAudioSession.sharedInstance()
+                  var stage = "配置音频会话"
+                  do {
+                      try session.setCategory(category, mode: mode)
+                      stage = "激活音频会话"
+                      try session.setActive(true)
+
+                      audioEngine = AVAudioEngine()
+                      let input = audioEngine.inputNode
+                      let hardwareFormat = input.inputFormat(forBus: 0)
+                      let tapFormat = input.outputFormat(forBus: 0)
+                      guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0,
+                            tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
+                          throw MicrophoneFailure(detail: "当前没有可用的麦克风输入")
+                      }
+
+                      let speechRequest = SFSpeechAudioBufferRecognitionRequest()
+                      speechRequest.shouldReportPartialResults = true
+                      speechRequest.requiresOnDeviceRecognition = true
+                      input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                          speechRequest.append(buffer)
+                      }
+                      tapInstalled = true
+                      stage = "启动音频引擎"
+                      audioEngine.prepare()
+                      try audioEngine.start()
+                      return speechRequest
+                  } catch {
+                      releaseMicrophone()
+                      let reason = error as NSError
+                      throw MicrophoneFailure(detail: "\(stage)失败：\(reason.localizedDescription) [\(reason.code)]")
+                  }
+              }
+
+              @MainActor
+              private func stopRecognition() {
+                  startupID = nil
+                  releaseMicrophone()
+                  request?.endAudio()
+                  recognitionTask?.cancel()
+                  request = nil
+                  recognitionTask = nil
+                  isRecording = false
+              }
+
+              @MainActor
+              private func releaseMicrophone() {
+                  if audioEngine.isRunning { audioEngine.stop() }
+                  removeInputTap()
+                  try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+              }
+
+              @MainActor
+              private func removeInputTap() {
+                  guard tapInstalled else { return }
+                  audioEngine.inputNode.removeTap(onBus: 0)
+                  tapInstalled = false
+              }
+
+              @MainActor
+              private func submitTranslation() {
+                  let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !text.isEmpty, translationTask == nil else { return }
+                  let source = sourceLanguage == "vi-VN" ? "vi" : "zh-CN"
+                  let target = source == "vi" ? "zh-CN" : "vi"
+                  status = "正在联网翻译…"
+                  translated = ""
+                  translationTask = Task {
+                      do {
+                          let result = try await Self.translateOnline(text, source: source, target: target)
+                          try Task.checkCancellation()
+                          translated = result
+                          status = "联网翻译完成 · \(direction)"
+                      } catch {
+                          guard !Task.isCancelled else { return }
+                          status = "联网翻译失败：\(error.localizedDescription)"
+                      }
+                      translationTask = nil
+                  }
+              }
+
+              private struct OnlineTranslationResponse: Decodable {
+                  struct TranslationData: Decodable { let translatedText: String }
+                  let responseStatus: Int
+                  let responseData: TranslationData?
+              }
+
+              private static func translateOnline(_ text: String, source: String, target: String) async throws -> String {
+                  var chunks: [String] = []
+                  var current = ""
+                  var bytes = 0
+                  for scalar in text.unicodeScalars {
+                      let piece = String(scalar)
+                      let count = piece.utf8.count
+                      if bytes + count > 450 {
+                          chunks.append(current)
+                          current = ""
+                          bytes = 0
+                      }
+                      current += piece
+                      bytes += count
+                  }
+                  if !current.isEmpty { chunks.append(current) }
+
+                  var translations: [String] = []
+                  for chunk in chunks {
+                      try Task.checkCancellation()
+                      var url = URLComponents()
+                      url.scheme = "https"
+                      url.host = "api.mymemory.translated.net"
+                      url.path = "/get"
+                      url.queryItems = [
+                          URLQueryItem(name: "q", value: chunk),
+                          URLQueryItem(name: "langpair", value: "\(source)|\(target)")
+                      ]
+                      guard let endpoint = url.url else { throw URLError(.badURL) }
+                      let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+                      let (data, response) = try await URLSession.shared.data(for: request)
+                      guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                      let result = try JSONDecoder().decode(OnlineTranslationResponse.self, from: data)
+                      guard result.responseStatus == 200,
+                            let text = result.responseData?.translatedText.trimmingCharacters(in: .whitespacesAndNewlines),
+                            !text.isEmpty, !text.uppercased().hasPrefix("MYMEMORY WARNING") else {
+                          throw MicrophoneFailure(detail: "在线翻译服务暂不可用或额度已用完。")
+                      }
+                      translations.append(text)
+                  }
+                  return translations.joined(separator: target == "vi" ? " " : "")
+              }
+
+              private func speakTranslation() {
+                  guard !translated.isEmpty else { return }
+                  let phrase = AVSpeechUtterance(string: translated)
+                  phrase.voice = AVSpeechSynthesisVoice(language: targetLanguage)
+                  synthesizer.speak(phrase)
+              }
+          }
+
           struct ProfileView: View {
               @AppStorage("nickname") private var nickname = "越聊用户"
               @AppStorage("avatarData") private var avatarData = Data()
@@ -186,7 +952,7 @@ jobs:
                                       Divider().padding(.leading, 64)
                                       Link(destination: URL(string: "https://yueliao.eu.cc/privacy.html")!) { row("隐私说明", "hand.raised.fill", .gray) }
                                       Divider().padding(.leading, 64)
-                                      NavigationLink { Text("越聊 iOS 原生界面工程 0.1\n\n此版本只完成个人页与底部导航。聊天、账号同步、音视频与推送仍待开发。\n\n非已签名安装包。").padding().navigationTitle("关于越聊") } label: { row("关于越聊", "info.circle.fill", .purple) }
+                                      NavigationLink { Text("越聊 iOS 原生界面 0.2\n\n包含群聊、通讯录和本机语音识别与翻译测试。视频通话、对方语音接入、来电推送仍待开发。\n\n此 IPA 未签名，需通过 SideStore 安装签名。").padding().navigationTitle("关于越聊") } label: { row("关于越聊", "info.circle.fill", .purple) }
                                   }.background(.background, in: RoundedRectangle(cornerRadius: 20))
                                   Text("本机资料不会自动同步到网页账号。").font(.footnote).foregroundStyle(.secondary)
                               }.padding(16).background(Color(uiColor: .systemGroupedBackground), in: RoundedRectangle(cornerRadius: 26)).offset(y: -20)
@@ -222,7 +988,7 @@ jobs:
           options:
             bundleIdPrefix: cc.eu.yueliao
             deploymentTarget:
-              iOS: '16.0'
+              iOS: '18.0'
           targets:
             YueLiao:
               type: application
@@ -234,6 +1000,8 @@ jobs:
                   SWIFT_VERSION: '5.0'
                   GENERATE_INFOPLIST_FILE: YES
                   INFOPLIST_KEY_CFBundleDisplayName: 越聊
+                  INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在本机识别语音，用于实时字幕和翻译测试。
+                  INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.1.0'
                   CURRENT_PROJECT_VERSION: '1'
@@ -241,14 +1009,16 @@ jobs:
                 gatherCoverageData: false
           YUELIAO_SOURCE
           cd native-ios
+          bash ../.github/workflows/patch-ios.sh pre
           xcodegen generate
           xcodebuild -project YueLiao.xcodeproj -scheme YueLiao -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
+          bash ../.github/workflows/patch-ios.sh post
           /usr/bin/ditto -c -k --keepParent Payload YueLiao.ipa
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: YueLiao-SideStore
           path: native-ios/YueLiao.ipa
+          archive: false
           if-no-files-found: error
