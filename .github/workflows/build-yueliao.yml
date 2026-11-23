@@ -465,6 +465,9 @@ jobs:
                       configuration.allowsInlineMediaPlayback = true
                       configuration.userContentController.add(bridge, name: "appleTranslate")
                       let webView = WKWebView(frame: .zero, configuration: configuration)
+                      webView.scrollView.contentInsetAdjustmentBehavior = .never
+                      webView.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.055, alpha: 1)
+                      webView.underPageBackgroundColor = webView.backgroundColor
                       webView.load(URLRequest(url: AppleTranslationBridge.site))
                       return webView
                   }
@@ -586,34 +589,11 @@ jobs:
           import UIKit
 
           @main struct YueLiaoApp: App {
-              @StateObject private var outbox = GroupOutbox()
-              @StateObject private var notebook = Notebook()
-
-              init() {
-                  let appearance = UITabBarAppearance()
-                  appearance.configureWithOpaqueBackground()
-                  appearance.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.055, alpha: 1)
-                  UITabBar.appearance().standardAppearance = appearance
-                  UITabBar.appearance().scrollEdgeAppearance = appearance
-              }
-
               var body: some Scene {
                   WindowGroup {
-                      TabView {
-                          GroupsPage(outbox: outbox)
-                              .tabItem { Label("群聊", systemImage: "bubble.left.and.bubble.right.fill") }
-                          PeoplePage(notebook: notebook, chats: false)
-                              .tabItem { Label("联系人", systemImage: "person.2.fill") }
-                          LocalTranslationView()
-                              .tabItem { Label("互译", systemImage: "character.bubble.fill") }
-                          YueLiaoAppleTranslationWebView()
-                              .tabItem { Label("越聊网页", systemImage: "globe") }
-                          ProfileView()
-                              .tabItem { Label("我的", systemImage: "person.crop.circle") }
-                      }
-                      .tint(Color(red: 0.847, green: 0.710, blue: 0.427))
-                      .preferredColorScheme(.dark)
-                      .task { await outbox.run() }
+                      YueLiaoAppleTranslationWebView()
+                          .background(Color(red: 0.035, green: 0.043, blue: 0.055).ignoresSafeArea())
+                          .preferredColorScheme(.dark)
                   }
               }
           }
@@ -1152,6 +1132,27 @@ jobs:
               }
           }
           YUELIAO_TRANSLATION
+          cat > native-ios/YueLiao/LaunchScreen.storyboard <<'YUELIAO_LAUNCH'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" targetRuntime="iOS.CocoaTouch" useAutolayout="YES" launchScreen="YES" initialViewController="launch-controller">
+              <dependencies>
+                  <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="1"/>
+              </dependencies>
+              <scenes>
+                  <scene sceneID="launch-scene">
+                      <objects>
+                          <viewController id="launch-controller" sceneMemberID="viewController">
+                              <view key="view" contentMode="scaleToFill" id="launch-view">
+                                  <rect key="frame" x="0.0" y="0.0" width="390" height="844"/>
+                                  <color key="backgroundColor" red="0.035" green="0.043" blue="0.055" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                              </view>
+                          </viewController>
+                          <placeholder placeholderIdentifier="IBFirstResponder" id="launch-responder" sceneMemberID="firstResponder"/>
+                      </objects>
+                  </scene>
+              </scenes>
+          </document>
+          YUELIAO_LAUNCH
           cat > native-ios/project.yml <<'YUELIAO_SOURCE'
           name: YueLiao
           options:
@@ -1168,12 +1169,15 @@ jobs:
                   PRODUCT_BUNDLE_IDENTIFIER: cc.eu.yueliao.ios
                   SWIFT_VERSION: '5.0'
                   GENERATE_INFOPLIST_FILE: YES
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                  INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
                   INFOPLIST_KEY_CFBundleDisplayName: 越聊
-                  INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在本机识别语音，用于实时字幕和翻译测试。
+                  INFOPLIST_KEY_NSCameraUsageDescription: 越聊在你开启视频通话时使用摄像头。
+                  INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在你录制语音消息或开启音视频通话时使用麦克风。
                   INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.2.0'
-                  CURRENT_PROJECT_VERSION: '2'
+                  CURRENT_PROJECT_VERSION: '3'
           YUELIAO_SOURCE
           cd native-ios
           bash ../.github/workflows/patch-ios.sh pre
@@ -1193,6 +1197,10 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
           bash ../.github/workflows/patch-ios.sh post
+          test -d Payload/YueLiao.app/LaunchScreen.storyboardc
+          test -s Payload/YueLiao.app/Assets.car
+          /usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' Payload/YueLiao.app/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' Payload/YueLiao.app/Info.plist
           /usr/bin/ditto -c -k --keepParent Payload YueLiao.ipa
       - uses: actions/upload-artifact@v7
         with:
