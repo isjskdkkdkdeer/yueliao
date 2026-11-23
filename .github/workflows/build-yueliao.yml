@@ -1,7 +1,7 @@
 name: Build YueLiao IPA
 on:
   push:
-    paths: ['.github/workflows/build-yueliao.yml', '.github/workflows/patch-ios.sh']
+    paths: ['.github/workflows/build-yueliao.yml', '.github/workflows/patch-ios.sh', 'AppIcon-1024.png']
   workflow_dispatch:
 permissions:
   contents: read
@@ -1177,7 +1177,7 @@ jobs:
                   INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.2.0'
-                  CURRENT_PROJECT_VERSION: '3'
+                  CURRENT_PROJECT_VERSION: '4'
           YUELIAO_SOURCE
           cd native-ios
           bash ../.github/workflows/patch-ios.sh pre
