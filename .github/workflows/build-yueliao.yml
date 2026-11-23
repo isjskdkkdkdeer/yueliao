@@ -468,7 +468,9 @@ jobs:
                       webView.scrollView.contentInsetAdjustmentBehavior = .never
                       webView.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.055, alpha: 1)
                       webView.underPageBackgroundColor = webView.backgroundColor
-                      webView.load(URLRequest(url: AppleTranslationBridge.site))
+                      // Refresh the HTML entry point without clearing the user's site data.
+                      let request = URLRequest(url: AppleTranslationBridge.site, cachePolicy: .reloadIgnoringLocalCacheData)
+                      webView.load(request)
                       return webView
                   }
 
@@ -1155,7 +1157,7 @@ jobs:
                   INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 越聊要求系统语音识别仅在本机处理，不会回退到云端。
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.2.0'
-                  CURRENT_PROJECT_VERSION: '4'
+                  CURRENT_PROJECT_VERSION: '5'
           YUELIAO_SOURCE
           cd native-ios
           bash ../.github/workflows/patch-ios.sh pre
