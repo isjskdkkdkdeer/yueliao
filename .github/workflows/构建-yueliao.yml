@@ -476,6 +476,8 @@ jobs:
               @State private var translated = ""
               @State private var status = "点击开始，用本机麦克风说话"
               @State private var isRecording = false
+              @State private var startupID: UUID?
+              @State private var tapInstalled = false
               @State private var configuration = TranslationSession.Configuration(
                   source: Locale.Language(identifier: "zh-Hans"),
                   target: Locale.Language(identifier: "vi")
@@ -487,6 +489,11 @@ jobs:
               @State private var debounceTask: Task<Void, Never>?
               @State private var synthesizer = AVSpeechSynthesizer()
 
+              private var isStarting: Bool { startupID != nil }
+              private var recognitionButtonTitle: String {
+                  if isStarting { return "正在启动…" }
+                  return isRecording ? "停止识别" : "开始本地识别"
+              }
               private var targetLanguage: String { sourceLanguage == "zh-CN" ? "vi-VN" : "zh-CN" }
               private var direction: String { sourceLanguage == "zh-CN" ? "中文 → 越南语" : "越南语 → 中文" }
 
@@ -502,7 +509,7 @@ jobs:
                               translated = ""
                           } label: {
                               Label(direction, systemImage: "arrow.left.arrow.right").frame(maxWidth: .infinity)
-                          }.buttonStyle(.bordered).disabled(isRecording)
+                          }.buttonStyle(.bordered).disabled(isRecording || isStarting)
                           GroupBox("识别原文") {
                               Text(transcript.isEmpty ? "说话后，识别文字会显示在这里" : transcript)
                                   .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
@@ -512,9 +519,9 @@ jobs:
                                   .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).textSelection(.enabled)
                           }
                           HStack {
-                              Button(isRecording ? "停止识别" : "开始本地识别") {
+                              Button(recognitionButtonTitle) {
                                   if isRecording { stopRecognition() } else { Task { await startRecognition() } }
-                              }.buttonStyle(.borderedProminent)
+                              }.buttonStyle(.borderedProminent).disabled(isStarting)
                               Button { speakTranslation() } label: {
                                   Label("播放译声", systemImage: "speaker.wave.2")
                               }.buttonStyle(.bordered).disabled(translated.isEmpty)
@@ -544,17 +551,28 @@ jobs:
 
               @MainActor
               private func startRecognition() async {
+                  guard !isStarting, !isRecording else { return }
+                  removeInputTap()
+
+                  let attempt = UUID()
+                  startupID = attempt
+                  defer {
+                      if startupID == attempt { startupID = nil }
+                  }
+
                   let micAllowed: Bool = await withCheckedContinuation { continuation in
                       AVAudioSession.sharedInstance().requestRecordPermission { allowed in
                           continuation.resume(returning: allowed)
                       }
                   }
+                  guard startupID == attempt else { return }
                   guard micAllowed else { status = "请在 iPhone 设置中允许越聊使用麦克风"; return }
                   let speechAllowed: Bool = await withCheckedContinuation { continuation in
                       SFSpeechRecognizer.requestAuthorization { auth in
                           continuation.resume(returning: auth == .authorized)
                       }
                   }
+                  guard startupID == attempt else { return }
                   guard speechAllowed else { status = "请在 iPhone 设置中允许语音识别"; return }
                   guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: sourceLanguage)), recognizer.isAvailable else {
                       status = "当前语言的语音识别暂不可用"; return
@@ -572,6 +590,7 @@ jobs:
                       input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
                           speechRequest.append(buffer)
                       }
+                      tapInstalled = true
                       audioEngine.prepare()
                       try audioEngine.start()
                       request = speechRequest
@@ -579,6 +598,7 @@ jobs:
                           if let result {
                               let text = result.bestTranscription.formattedString
                               Task { @MainActor in
+                                  guard request === speechRequest else { return }
                                   transcript = text
                                   debounceTask?.cancel()
                                   debounceTask = Task {
@@ -590,6 +610,7 @@ jobs:
                           }
                           if let error {
                               Task { @MainActor in
+                                  guard request === speechRequest else { return }
                                   status = error.localizedDescription
                                   stopRecognition()
                               }
@@ -605,16 +626,22 @@ jobs:
 
               @MainActor
               private func stopRecognition() {
-                  if audioEngine.isRunning {
-                      audioEngine.stop()
-                      audioEngine.inputNode.removeTap(onBus: 0)
-                  }
+                  startupID = nil
+                  if audioEngine.isRunning { audioEngine.stop() }
+                  removeInputTap()
                   request?.endAudio()
                   recognitionTask?.cancel()
                   request = nil
                   recognitionTask = nil
                   isRecording = false
                   try? AVAudioSession.sharedInstance().setActive(false)
+              }
+
+              @MainActor
+              private func removeInputTap() {
+                  guard tapInstalled else { return }
+                  audioEngine.inputNode.removeTap(onBus: 0)
+                  tapInstalled = false
               }
 
               @MainActor
