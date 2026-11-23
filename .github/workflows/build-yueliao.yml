@@ -1132,27 +1132,6 @@ jobs:
               }
           }
           YUELIAO_TRANSLATION
-          cat > native-ios/YueLiao/LaunchScreen.storyboard <<'YUELIAO_LAUNCH'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" targetRuntime="iOS.CocoaTouch" useAutolayout="YES" launchScreen="YES" initialViewController="launch-controller">
-              <dependencies>
-                  <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="1"/>
-              </dependencies>
-              <scenes>
-                  <scene sceneID="launch-scene">
-                      <objects>
-                          <viewController id="launch-controller" sceneMemberID="viewController">
-                              <view key="view" contentMode="scaleToFill" id="launch-view">
-                                  <rect key="frame" x="0.0" y="0.0" width="390" height="844"/>
-                                  <color key="backgroundColor" red="0.035" green="0.043" blue="0.055" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                              </view>
-                          </viewController>
-                          <placeholder placeholderIdentifier="IBFirstResponder" id="launch-responder" sceneMemberID="firstResponder"/>
-                      </objects>
-                  </scene>
-              </scenes>
-          </document>
-          YUELIAO_LAUNCH
           cat > native-ios/project.yml <<'YUELIAO_SOURCE'
           name: YueLiao
           options:
@@ -1170,7 +1149,6 @@ jobs:
                   SWIFT_VERSION: '5.0'
                   GENERATE_INFOPLIST_FILE: YES
                   ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-                  INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
                   INFOPLIST_KEY_CFBundleDisplayName: 越聊
                   INFOPLIST_KEY_NSCameraUsageDescription: 越聊在你开启视频通话时使用摄像头。
                   INFOPLIST_KEY_NSMicrophoneUsageDescription: 越聊在你录制语音消息或开启音视频通话时使用麦克风。
@@ -1197,9 +1175,8 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
           bash ../.github/workflows/patch-ios.sh post
-          test -d Payload/YueLiao.app/LaunchScreen.storyboardc
           test -s Payload/YueLiao.app/Assets.car
-          /usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' Payload/YueLiao.app/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' Payload/YueLiao.app/Info.plist
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' Payload/YueLiao.app/Info.plist
           /usr/bin/ditto -c -k --keepParent Payload YueLiao.ipa
       - uses: actions/upload-artifact@v7
