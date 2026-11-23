@@ -585,23 +585,12 @@ jobs:
           import UIKit
 
           @main struct YueLiaoApp: App {
-              var body: some Scene { WindowGroup { RootView() } }
-          }
-          struct RootView: View {
-              @StateObject private var notebook = Notebook()
-              @StateObject private var outbox = GroupOutbox()
-              var body: some View {
-                  TabView {
+              var body: some Scene {
+                  WindowGroup {
                       YueLiaoAppleTranslationWebView()
-                          .tabItem { Label("网页版", systemImage: "globe") }
-                      GroupsPage(outbox: outbox)
-                          .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
-                      PeoplePage(notebook: notebook, chats: false)
-                          .tabItem { Label("通讯录", systemImage: "person.2") }
-                      LocalTranslationView()
-                          .tabItem { Label("语音翻译", systemImage: "waveform.and.mic") }
-                      ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
-                  }.tint(.blue).task { await outbox.run() }
+                          .background(Color(red: 0.035, green: 0.043, blue: 0.055).ignoresSafeArea())
+                          .preferredColorScheme(.dark)
+                  }
               }
           }
           struct PendingView: View {
