@@ -430,6 +430,152 @@ jobs:
               }
           }
           YUELIAO_SOURCE
+          cat > native-ios/YueLiao/AppleTranslationBridge.swift <<'YUELIAO_BRIDGE'
+          import Foundation
+          import SwiftUI
+          import Translation
+          import WebKit
+
+          // Use YueLiaoAppleTranslationWebView() in the existing SwiftUI tab.
+          // UIKit can host the same view with UIHostingController(rootView: ...).
+          @available(iOS 18.0, *)
+          struct YueLiaoAppleTranslationWebView: View {
+              @StateObject private var bridge = AppleTranslationBridge()
+
+              var body: some View {
+                  BridgeWebView(bridge: bridge)
+                      .background {
+                          if let request = bridge.current {
+                              Color.clear
+                                  .frame(width: 0, height: 0)
+                                  .translationTask(request.configuration) { session in
+                                      await bridge.translate(request, using: session)
+                                  }
+                                  .id(request.id)
+                          }
+                      }
+              }
+
+              private struct BridgeWebView: UIViewRepresentable {
+                  let bridge: AppleTranslationBridge
+
+                  func makeUIView(context: Context) -> WKWebView {
+                      let configuration = WKWebViewConfiguration()
+                      configuration.allowsInlineMediaPlayback = true
+                      configuration.userContentController.add(bridge, name: "appleTranslate")
+                      let webView = WKWebView(frame: .zero, configuration: configuration)
+                      webView.load(URLRequest(url: AppleTranslationBridge.site))
+                      return webView
+                  }
+
+                  func updateUIView(_ webView: WKWebView, context: Context) {}
+
+                  static func dismantleUIView(_ webView: WKWebView, coordinator: ()) {
+                      webView.configuration.userContentController.removeScriptMessageHandler(forName: "appleTranslate")
+                  }
+              }
+          }
+
+          @available(iOS 18.0, *)
+          @MainActor
+          private final class AppleTranslationBridge: NSObject, ObservableObject, WKScriptMessageHandler {
+              static let site = URL(string: "https://yueliao.eu.cc/")!
+
+              struct Request {
+                  let id: String
+                  let text: String
+                  let source: Locale.Language
+                  let target: Locale.Language
+                  let frame: WKFrameInfo
+
+                  var configuration: TranslationSession.Configuration {
+                      .init(source: source, target: target)
+                  }
+              }
+
+              @Published private(set) var current: Request?
+              private var pending: [Request] = []
+              private var translating = false
+              private weak var webView: WKWebView?
+
+              func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+                  let frame = message.frameInfo
+                  let origin = frame.securityOrigin
+                  guard message.name == "appleTranslate", frame.isMainFrame,
+                        origin.protocol == "https", origin.host == Self.site.host,
+                        origin.port == 0 || origin.port == 443,
+                        let webView = message.webView,
+                        let body = message.body as? [String: Any],
+                        let id = body["requestId"] as? String, UUID(uuidString: id) != nil else { return }
+                  self.webView = webView
+
+                  guard let rawText = body["sourceText"] as? String,
+                        let from = body["fromLang"] as? String, let to = body["toLang"] as? String,
+                        let source = Self.language(from), let target = Self.language(to), source != target else {
+                      reply(id, frame: frame, error: "请选择中越互译方向。")
+                      return
+                  }
+                  let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !text.isEmpty, text.unicodeScalars.count <= 450 else {
+                      reply(id, frame: frame, error: "翻译文字长度须在 1 到 450 字之间。")
+                      return
+                  }
+                  guard pending.count < 8 else {
+                      reply(id, frame: frame, error: "本机翻译请求过多，请稍后重试。")
+                      return
+                  }
+                  let request = Request(id: id, text: text, source: source, target: target, frame: frame)
+                  if current == nil { current = request } else { pending.append(request) }
+              }
+
+              func translate(_ request: Request, using session: TranslationSession) async {
+                  guard current?.id == request.id, !translating else { return }
+                  translating = true
+                  defer {
+                      translating = false
+                      current = pending.isEmpty ? nil : pending.removeFirst()
+                  }
+                  let availability = await LanguageAvailability().status(from: request.source, to: request.target)
+                  guard !Task.isCancelled else { return }
+                  guard availability == .installed else {
+                      let error = availability == .supported
+                          ? "请先在系统中下载中越翻译语言包，再重试。"
+                          : "此设备的 Apple Translation 暂不支持该中越翻译方向。"
+                      reply(request.id, frame: request.frame, error: error)
+                      return
+                  }
+                  do {
+                      let result = try await session.translate(request.text)
+                      try Task.checkCancellation()
+                      reply(request.id, frame: request.frame, text: result.targetText)
+                  } catch {
+                      if !Task.isCancelled {
+                          reply(request.id, frame: request.frame, error: "Apple 本机翻译失败，请重试。")
+                      }
+                  }
+              }
+
+              private static func language(_ code: String) -> Locale.Language? {
+                  switch code {
+                  case "zh", "zh-CN", "zh-Hans": return Locale.Language(identifier: "zh-Hans")
+                  case "vi", "vi-VN": return Locale.Language(identifier: "vi")
+                  default: return nil
+                  }
+              }
+
+              private func reply(_ id: String, frame: WKFrameInfo, text: String? = nil, error: String? = nil) {
+                  let arguments: [String: Any] = [
+                      "requestId": id,
+                      "translatedText": text.map { $0 as Any } ?? NSNull(),
+                      "error": error.map { $0 as Any } ?? NSNull(),
+                  ]
+                  webView?.callAsyncJavaScript(
+                      "window.__onAppleTranslateResult?.(requestId, translatedText, error)",
+                      arguments: arguments, in: frame, in: .page, completionHandler: { _ in }
+                  )
+              }
+          }
+          YUELIAO_BRIDGE
           cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
           import SwiftUI
           import PhotosUI
@@ -446,7 +592,7 @@ jobs:
               @StateObject private var outbox = GroupOutbox()
               var body: some View {
                   TabView {
-                      YueLiaoWebView()
+                      YueLiaoAppleTranslationWebView()
                           .tabItem { Label("网页版", systemImage: "globe") }
                       GroupsPage(outbox: outbox)
                           .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
@@ -457,17 +603,6 @@ jobs:
                       ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
                   }.tint(.blue).task { await outbox.run() }
               }
-          }
-          struct YueLiaoWebView: UIViewRepresentable {
-              func makeUIView(context: Context) -> WKWebView {
-                  let configuration = WKWebViewConfiguration()
-                  configuration.allowsInlineMediaPlayback = true
-                  let webView = WKWebView(frame: .zero, configuration: configuration)
-                  webView.load(URLRequest(url: URL(string: "https://yueliao.eu.cc/")!))
-                  return webView
-              }
-
-              func updateUIView(_ webView: WKWebView, context: Context) {}
           }
           struct PendingView: View {
               let title: String
