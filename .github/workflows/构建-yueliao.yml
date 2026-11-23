@@ -18,6 +18,8 @@ jobs:
           import SwiftUI
           import CryptoKit
           import Security
+          import NaturalLanguage
+          import Translation
 
           struct ChatRoom: Codable, Identifiable {
               let id, name, code: String
@@ -25,7 +27,7 @@ jobs:
           struct RoomMessage: Codable, Identifiable {
               let seq: Int
               let text, senderName: String
-              let translation: String?
+              let lang: String?
               let out: Bool
               var id: Int { seq }
           }
@@ -68,6 +70,8 @@ jobs:
               }
           }
           struct GroupsPage: View {
+              @ObservedObject var outbox: GroupOutbox
+              @AppStorage("cachedGroupRooms") private var cachedRooms = Data()
               @AppStorage("nickname") private var nick = "越聊用户"
               @AppStorage("language") private var language = "中文"
               @State private var rooms: [ChatRoom] = []
@@ -79,7 +83,7 @@ jobs:
                   NavigationStack {
                       List {
                           Section("我的群聊") {
-                              ForEach(rooms) { room in NavigationLink(room.name) { ThreadPage(room: room) } }
+                              ForEach(rooms) { room in NavigationLink(room.name) { ThreadPage(room: room, outbox: outbox) } }
                           }
                           Section("创建或加入") {
                               TextField("群名或群邀请码", text: $value)
@@ -91,13 +95,20 @@ jobs:
                   }
               }
               func load() async {
+                  if rooms.isEmpty, let cached = try? JSONDecoder().decode([ChatRoom].self, from: cachedRooms) {
+                      rooms = cached
+                  }
                   do {
                       let device = SHA256.hash(data: Data((try RoomService.token()).utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
                       _ = try await RoomService.post("register", ["id":"ios-" + device,"name":nick,"language":language == "中文" ? "zh" : "vi"], as: Registered.self)
                       rooms = try await RoomService.post("groups-list", [:], as: RoomList.self).groups
+                      cacheRooms()
                       ready = true
                       notice = ""
                   } catch { notice = error.localizedDescription }
+              }
+              private func cacheRooms() {
+                  if let data = try? JSONEncoder().encode(rooms) { cachedRooms = data }
               }
               func change(_ create: Bool) {
                   let input = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -108,59 +119,228 @@ jobs:
                       do {
                           let room = try await RoomService.post(create ? "groups-create" : "groups-join", [create ? "name" : "code":input], as: RoomResult.self).group
                           if !rooms.contains(where: { $0.id == room.id }) { rooms.append(room) }
+                          cacheRooms()
                           value = ""; notice = ""
                       } catch { notice = error.localizedDescription }
                   }
               }
           }
+          enum ChatLanguage: String, Codable {
+              case chinese = "zh"
+              case vietnamese = "vi"
+
+              var locale: Locale.Language {
+                  Locale.Language(identifier: self == .chinese ? "zh-Hans" : "vi")
+              }
+
+              var opposite: Self { self == .chinese ? .vietnamese : .chinese }
+
+              static func detect(_ text: String) -> Self? {
+                  if text.unicodeScalars.contains(where: { $0.properties.isIdeographic }) { return .chinese }
+                  if NLLanguageRecognizer.dominantLanguage(for: text) == .vietnamese { return .vietnamese }
+                  return nil
+              }
+          }
+
+          struct ChatTranslation: View {
+              let text: String
+              let source: ChatLanguage
+              let target: ChatLanguage
+              var preview = false
+              @State private var result = ""
+
+              var body: some View {
+                  if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, source != target {
+                      VStack(alignment: .leading) {
+                          if !result.isEmpty {
+                              Text(result).font(.caption).foregroundStyle(.secondary)
+                          }
+                      }
+                      .translationTask(TranslationSession.Configuration(source: source.locale, target: target.locale)) { session in
+                          do {
+                              if preview { try await Task.sleep(for: .milliseconds(350)) }
+                              let status = await LanguageAvailability().status(from: source.locale, to: target.locale)
+                              try Task.checkCancellation()
+                              switch status {
+                              case .installed:
+                                  let response = try await session.translate(text)
+                                  try Task.checkCancellation()
+                                  result = (preview ? "本机预览：" : "本机译文：") + response.targetText
+                              case .supported:
+                                  result = "中越翻译语言包未下载，请在系统翻译设置中下载。"
+                              case .unsupported:
+                                  result = "当前设备或系统不支持中越本机翻译。"
+                              @unknown default:
+                                  result = "中越翻译语言包暂不可用。"
+                              }
+                          } catch {
+                              if !Task.isCancelled { result = "本机翻译暂不可用，请检查中越翻译语言包。" }
+                          }
+                      }
+                  }
+              }
+          }
+
+          struct PendingGroupMessage: Codable, Identifiable {
+              let id: UUID
+              let roomID: String
+              let text: String
+              let language: ChatLanguage
+          }
+
+          @MainActor
+          final class GroupOutbox: ObservableObject {
+              @Published private(set) var pending: [PendingGroupMessage] = []
+              @Published private(set) var notice = ""
+              @Published private(set) var deliveryVersion = 0
+              private let file: URL
+              private var loaded = false
+              private var sending = false
+
+              init() {
+                  file = URL.applicationSupportDirectory.appendingPathComponent("group-outbox.json")
+                  do {
+                      do {
+                          pending = try JSONDecoder().decode([PendingGroupMessage].self, from: Data(contentsOf: file))
+                      } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                          pending = []
+                      }
+                      loaded = true
+                  } catch {
+                      notice = "无法读取本机发送队列。"
+                  }
+              }
+
+              func enqueue(roomID: String, text: String, language: ChatLanguage) -> Bool {
+                  guard loaded else { return false }
+                  let message = PendingGroupMessage(id: UUID(), roomID: roomID, text: text, language: language)
+                  do {
+                      try save(pending + [message])
+                      notice = ""
+                      return true
+                  } catch {
+                      notice = "无法保存消息，草稿仍保留。"
+                      return false
+                  }
+              }
+
+              private func save(_ messages: [PendingGroupMessage]) throws {
+                  try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                  try JSONEncoder().encode(messages).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                  pending = messages
+              }
+
+              func retry() async {
+                  guard loaded, !sending else { return }
+                  sending = true
+                  defer { sending = false }
+
+                  // Retain the same mailbox message ID across retries and app launches.
+                  for message in pending {
+                      guard !Task.isCancelled else { return }
+                      do {
+                          let payload = ["id": message.id.uuidString, "text": message.text, "lang": message.language.rawValue]
+                          let response = try await RoomService.post("groups-send", ["groupId": message.roomID, "message": payload], as: Sent.self)
+                          guard response.ok else { throw URLError(.badServerResponse) }
+                          try save(pending.filter { $0.id != message.id })
+                          deliveryVersion += 1
+                          notice = ""
+                      } catch {
+                          if !Task.isCancelled { notice = "有消息等待发送，应用将自动重试。" }
+                          if error is URLError { return }
+                      }
+                  }
+              }
+
+              func run() async {
+                  while !Task.isCancelled {
+                      await retry()
+                      do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                  }
+              }
+          }
+
           struct ThreadPage: View {
               let room: ChatRoom
+              @ObservedObject var outbox: GroupOutbox
               @State private var messages: [RoomMessage] = []
               @State private var draft = ""
               @State private var notice = ""
-              @State private var busy = false
-              @State private var retryID = UUID().uuidString
+              @State private var refreshing = false
               @AppStorage("language") private var language = "中文"
+
+              private var preferredLanguage: ChatLanguage { language == "中文" ? .chinese : .vietnamese }
+              private var draftLanguage: ChatLanguage { ChatLanguage.detect(draft) ?? preferredLanguage }
+              private var queued: [PendingGroupMessage] { outbox.pending.filter { $0.roomID == room.id } }
+
               var body: some View {
                   VStack {
                       ShareLink("分享群邀请码", item: room.code)
-                      List(messages) { m in
-                          VStack(alignment: .leading) {
-                              Text(m.out ? "我" : m.senderName).font(.caption).foregroundStyle(.secondary)
-                              Text(m.text)
-                              if let t = m.translation, !t.isEmpty { Text(t).foregroundStyle(.secondary) }
+                      List {
+                          ForEach(messages) { message in
+                              let source = message.lang.flatMap(ChatLanguage.init(rawValue:))
+                                  ?? ChatLanguage.detect(message.text)
+                                  ?? (message.out ? preferredLanguage : preferredLanguage.opposite)
+                              let target = message.out ? source.opposite : preferredLanguage
+                              VStack(alignment: .leading) {
+                                  Text(message.out ? "我" : message.senderName).font(.caption).foregroundStyle(.secondary)
+                                  Text(message.text)
+                                  ChatTranslation(text: message.text, source: source, target: target)
+                                      .id(target)
+                              }
+                          }
+                          ForEach(queued) { message in
+                              VStack(alignment: .leading) {
+                                  Text(message.text)
+                                  Text("等待发送 · 已保存在本机").font(.caption).foregroundStyle(.secondary)
+                                  ChatTranslation(text: message.text, source: message.language, target: message.language.opposite)
+                              }
                           }
                       }
                       if !notice.isEmpty { Text(notice).font(.caption) }
+                      if !outbox.notice.isEmpty { Text(outbox.notice).font(.caption) }
+                      ChatTranslation(text: draft, source: draftLanguage, target: draftLanguage.opposite, preview: true)
+                          .id(PreviewIdentity(text: draft, language: draftLanguage))
                       HStack {
-                          TextField("输入消息", text: $draft).textFieldStyle(.roundedBorder).disabled(busy)
-                              .onChange(of: draft) { _ in retryID = UUID().uuidString }
-                          Button("发送") { submit() }.disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 450)
+                          TextField("输入消息", text: $draft).textFieldStyle(.roundedBorder)
+                          Button("发送") { submit() }
+                              .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 450)
                       }.padding()
-                  }.navigationTitle(room.name).task {
+                  }
+                  .navigationTitle(room.name)
+                  .task {
                       while !Task.isCancelled {
                           await refresh()
-                          do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { break }
+                          do { try await Task.sleep(for: .seconds(3)) } catch { return }
                       }
                   }
+                  .onChange(of: outbox.deliveryVersion) { _, _ in Task { await refresh() } }
               }
-              func refresh() async {
+
+              private struct PreviewIdentity: Hashable {
+                  let text: String
+                  let language: ChatLanguage
+              }
+
+              private func refresh() async {
+                  guard !refreshing else { return }
+                  refreshing = true
+                  defer { refreshing = false }
                   do {
-                      let batch = try await RoomService.post("groups-history", ["groupId":room.id,"after":messages.last?.seq ?? 0], as: MessageList.self).messages
-                      messages += batch.filter { m in !messages.contains(where: { $0.seq == m.seq }) }
-                  } catch { if !Task.isCancelled { notice = error.localizedDescription } }
-              }
-              func submit() {
-                  guard !busy else { return }
-                  busy = true
-                  Task {
-                      defer { busy = false }
-                      do {
-                          let payload = ["id":retryID,"text":draft,"lang":language == "中文" ? "zh" : "vi"]
-                          _ = try await RoomService.post("groups-send", ["groupId":room.id,"message":payload], as: Sent.self)
-                          draft = ""; notice = ""; await refresh()
-                      } catch { notice = error.localizedDescription }
+                      let batch = try await RoomService.post("groups-history", ["groupId": room.id, "after": messages.last?.seq ?? 0], as: MessageList.self).messages
+                      var seen = Set(messages.map(\.seq))
+                      messages += batch.filter { seen.insert($0.seq).inserted }
+                      messages.sort { $0.seq < $1.seq }
+                      notice = ""
+                  } catch {
+                      if !Task.isCancelled { notice = error.localizedDescription }
                   }
+              }
+
+              private func submit() {
+                  guard outbox.enqueue(roomID: room.id, text: draft, language: draftLanguage) else { return }
+                  draft = ""
+                  Task { await outbox.retry() }
               }
           }
           YUELIAO_GROUPS
@@ -263,16 +443,17 @@ jobs:
           }
           struct RootView: View {
               @StateObject private var notebook = Notebook()
+              @StateObject private var outbox = GroupOutbox()
               var body: some View {
                   TabView {
-                      GroupsPage()
+                      GroupsPage(outbox: outbox)
                           .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
                       PeoplePage(notebook: notebook, chats: false)
                           .tabItem { Label("通讯录", systemImage: "person.2") }
                       LocalTranslationView()
                           .tabItem { Label("本地翻译", systemImage: "waveform.and.mic") }
                       ProfileView().tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
-                  }.tint(.blue)
+                  }.tint(.blue).task { await outbox.run() }
               }
           }
           struct PendingView: View {
