@@ -630,7 +630,7 @@ jobs:
                   }
               }
           }
-          struct LocalTranslationView: View {
+          struct SpeechCaptionDemoView: View {
               @State private var sourceLanguage = "zh-CN"
               @State private var transcript = ""
               @State private var translated = ""
@@ -1043,10 +1043,25 @@ jobs:
               @State private var request: (id: UUID, text: String, direction: LocalDirection)?
               @State private var busy = false
               @State private var notice = ""
+              @State private var offlineStatus = "正在检查本机中越语言包…"
+              @State private var selectedTier = 0
 
               var body: some View {
                   NavigationStack {
                       VStack(spacing: 12) {
+                          Picker("翻译引擎", selection: $selectedTier) {
+                              Text("本机免费").tag(0)
+                              Text("黄金 VIP").tag(1)
+                              Text("黑钛金 VIP").tag(2)
+                          }
+                          .pickerStyle(.segmented)
+                          .padding(.horizontal)
+                          if selectedTier == 0 {
+                              Text(offlineStatus).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                          } else {
+                              Text("云端引擎尚未开通；需服务端会员校验与 API 接入，当前不会产生云端费用。")
+                                  .font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                          }
                           HStack {
                               Text(direction.title).font(.headline)
                               Spacer()
@@ -1087,6 +1102,15 @@ jobs:
                       }
                       .background(Color(red: 0.035, green: 0.043, blue: 0.055))
                       .navigationTitle("中越互译")
+                      .task(id: direction) {
+                          let status = await LanguageAvailability().status(from: direction.source, to: direction.target)
+                          switch status {
+                          case .installed: offlineStatus = "本机语言包已就绪 · 无云端 AI 费用"
+                          case .supported: offlineStatus = "系统支持此语言对，但尚未安装语言包"
+                          case .unsupported: offlineStatus = "苹果本机不支持此语言对；免费翻译暂不可用"
+                          @unknown default: offlineStatus = "无法确认本机语言包状态"
+                          }
+                      }
                       .translationTask(config) { session in
                           guard let current = request else { return }
                           do {
@@ -1096,7 +1120,7 @@ jobs:
                               notice = ""
                           } catch {
                               if request?.id == current.id {
-                                  notice = "翻译失败：\\(error.localizedDescription)"
+                                  notice = "翻译失败：\(error.localizedDescription)"
                               }
                           }
                           if request?.id == current.id {
@@ -1110,6 +1134,14 @@ jobs:
               private func submit() {
                   let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !text.isEmpty, !busy else { return }
+                  guard selectedTier == 0 else {
+                      notice = "云端会员引擎尚未接入，暂不收费或发送内容。"
+                      return
+                  }
+                  guard offlineStatus.hasPrefix("本机语言包已就绪") else {
+                      notice = "本机语言包尚不可用，无法开始离线翻译。"
+                      return
+                  }
                   busy = true
                   notice = ""
                   request = (UUID(), text, direction)
@@ -1141,8 +1173,6 @@ jobs:
                   TARGETED_DEVICE_FAMILY: '1'
                   MARKETING_VERSION: '0.2.0'
                   CURRENT_PROJECT_VERSION: '2'
-              scheme:
-                gatherCoverageData: false
           YUELIAO_SOURCE
           cd native-ios
           bash ../.github/workflows/patch-ios.sh pre
