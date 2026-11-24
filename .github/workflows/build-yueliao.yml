@@ -1,18 +1,21 @@
 name: Build YueLiao IPA
 on:
   push:
-    paths: ['.github/workflows/build-yueliao.yml', '.github/workflows/patch-ios.sh', 'AppIcon-1024.png']
+    paths: ['.github/workflows/build-yueliao.yml', '.github/workflows/patch-ios.sh', 'AppIcon-1024.png', 'native-ios/YueLiao/**']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   ipa:
-    runs-on: macos-15-intel
-    timeout-minutes: 12
+    runs-on: macos-26-intel
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - run: node tests/translation-web-adapter.test.mjs
       - run: |
           set -eu
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
           if ! command -v xcodegen >/dev/null 2>&1; then HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen; fi
           mkdir -p native-ios/YueLiao
           cat > native-ios/YueLiao/Groups.swift <<'YUELIAO_GROUPS'
@@ -431,157 +434,6 @@ jobs:
               }
           }
           YUELIAO_SOURCE
-          cat > native-ios/YueLiao/AppleTranslationBridge.swift <<'YUELIAO_BRIDGE'
-          import Foundation
-          import SwiftUI
-          import Translation
-          import WebKit
-
-          // Use YueLiaoAppleTranslationWebView() in the existing SwiftUI tab.
-          // UIKit can host the same view with UIHostingController(rootView: ...).
-          @available(iOS 18.0, *)
-          struct YueLiaoAppleTranslationWebView: View {
-              @StateObject private var bridge = AppleTranslationBridge()
-
-              var body: some View {
-                  BridgeWebView(bridge: bridge)
-                      .background {
-                          if let request = bridge.current {
-                              Color.clear
-                                  .frame(width: 0, height: 0)
-                                  .translationTask(request.configuration) { session in
-                                      await bridge.translate(request, using: session)
-                                  }
-                                  .id(request.id)
-                          }
-                      }
-              }
-
-              private struct BridgeWebView: UIViewRepresentable {
-                  let bridge: AppleTranslationBridge
-
-                  func makeUIView(context: Context) -> WKWebView {
-                      let configuration = WKWebViewConfiguration()
-                      configuration.allowsInlineMediaPlayback = true
-                      configuration.userContentController.add(bridge, name: "appleTranslate")
-                      let webView = WKWebView(frame: .zero, configuration: configuration)
-                      webView.scrollView.contentInsetAdjustmentBehavior = .never
-                      webView.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.055, alpha: 1)
-                      webView.underPageBackgroundColor = webView.backgroundColor
-                      // Refresh the HTML entry point without clearing the user's site data.
-                      let request = URLRequest(url: AppleTranslationBridge.site, cachePolicy: .reloadIgnoringLocalCacheData)
-                      webView.load(request)
-                      return webView
-                  }
-
-                  func updateUIView(_ webView: WKWebView, context: Context) {}
-
-                  static func dismantleUIView(_ webView: WKWebView, coordinator: ()) {
-                      webView.configuration.userContentController.removeScriptMessageHandler(forName: "appleTranslate")
-                  }
-              }
-          }
-
-          @available(iOS 18.0, *)
-          @MainActor
-          private final class AppleTranslationBridge: NSObject, ObservableObject, WKScriptMessageHandler {
-              static let site = URL(string: "https://yueliao.eu.cc/")!
-
-              struct Request {
-                  let id: String
-                  let text: String
-                  let source: Locale.Language
-                  let target: Locale.Language
-                  let frame: WKFrameInfo
-
-                  var configuration: TranslationSession.Configuration {
-                      .init(source: source, target: target)
-                  }
-              }
-
-              @Published private(set) var current: Request?
-              private var pending: [Request] = []
-              private var translating = false
-              private weak var webView: WKWebView?
-
-              func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-                  let frame = message.frameInfo
-                  let origin = frame.securityOrigin
-                  guard message.name == "appleTranslate", frame.isMainFrame,
-                        origin.protocol == "https", origin.host == Self.site.host,
-                        origin.port == 0 || origin.port == 443,
-                        let webView = message.webView,
-                        let body = message.body as? [String: Any],
-                        let id = body["requestId"] as? String, UUID(uuidString: id) != nil else { return }
-                  self.webView = webView
-
-                  guard let rawText = body["sourceText"] as? String,
-                        let from = body["fromLang"] as? String, let to = body["toLang"] as? String,
-                        let source = Self.language(from), let target = Self.language(to), source != target else {
-                      reply(id, frame: frame, error: "请选择中越互译方向。")
-                      return
-                  }
-                  let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-                  guard !text.isEmpty, text.unicodeScalars.count <= 450 else {
-                      reply(id, frame: frame, error: "翻译文字长度须在 1 到 450 字之间。")
-                      return
-                  }
-                  guard pending.count < 8 else {
-                      reply(id, frame: frame, error: "本机翻译请求过多，请稍后重试。")
-                      return
-                  }
-                  let request = Request(id: id, text: text, source: source, target: target, frame: frame)
-                  if current == nil { current = request } else { pending.append(request) }
-              }
-
-              func translate(_ request: Request, using session: TranslationSession) async {
-                  guard current?.id == request.id, !translating else { return }
-                  translating = true
-                  defer {
-                      translating = false
-                      current = pending.isEmpty ? nil : pending.removeFirst()
-                  }
-                  let availability = await LanguageAvailability().status(from: request.source, to: request.target)
-                  guard !Task.isCancelled else { return }
-                  guard availability == .installed else {
-                      let error = availability == .supported
-                          ? "请先在系统中下载中越翻译语言包，再重试。"
-                          : "此设备的 Apple Translation 暂不支持该中越翻译方向。"
-                      reply(request.id, frame: request.frame, error: error)
-                      return
-                  }
-                  do {
-                      let result = try await session.translate(request.text)
-                      try Task.checkCancellation()
-                      reply(request.id, frame: request.frame, text: result.targetText)
-                  } catch {
-                      if !Task.isCancelled {
-                          reply(request.id, frame: request.frame, error: "Apple 本机翻译失败，请重试。")
-                      }
-                  }
-              }
-
-              private static func language(_ code: String) -> Locale.Language? {
-                  switch code {
-                  case "zh", "zh-CN", "zh-Hans": return Locale.Language(identifier: "zh-Hans")
-                  case "vi", "vi-VN": return Locale.Language(identifier: "vi")
-                  default: return nil
-                  }
-              }
-
-              private func reply(_ id: String, frame: WKFrameInfo, text: String? = nil, error: String? = nil) {
-                  let arguments: [String: Any] = [
-                      "requestId": id,
-                      "translatedText": text.map { $0 as Any } ?? NSNull(),
-                      "error": error.map { $0 as Any } ?? NSNull(),
-                  ]
-                  webView?.callAsyncJavaScript(
-                      "window.__onAppleTranslateResult?.(requestId, translatedText, error)",
-                      arguments: arguments, in: frame, in: .page, completionHandler: { _ in }
-                  )
-              }
-          }
-          YUELIAO_BRIDGE
           cat > native-ios/YueLiao/YueLiaoApp.swift <<'YUELIAO_SOURCE'
           import SwiftUI
           import PhotosUI
