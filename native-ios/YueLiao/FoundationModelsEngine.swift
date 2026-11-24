@@ -30,9 +30,9 @@ struct TranslationContext: Codable, Hashable {
             sender: context.sender.map { String($0.prefix(80)) },
             recipient: context.recipient.map { String($0.prefix(80)) },
             relationship: context.relationship.map { String($0.prefix(120)) },
-            vocabulary: context.vocabulary.map {
-                Dictionary(uniqueKeysWithValues: $0.keys.sorted().prefix(12).compactMap { key in
-                    guard key.count <= 60, let value = $0[key], value.count <= 60 else { return nil }
+            vocabulary: context.vocabulary.map { entries in
+                Dictionary(uniqueKeysWithValues: entries.keys.sorted().prefix(12).compactMap { key in
+                    guard key.count <= 60, let value = entries[key], value.count <= 60 else { return nil }
                     return (key, value)
                 })
             }
