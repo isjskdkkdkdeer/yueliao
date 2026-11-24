@@ -25,6 +25,7 @@ enum TranslationWebAdapter {
         }
 
         const request = new Request(existing ? input : url, init);
+        if (request.headers.get('X-YueLiao-Consent') === 'translation') return originalFetch(request);
         const signal = request.signal;
         signal.throwIfAborted();
         const data = await request.json().catch(() => null);

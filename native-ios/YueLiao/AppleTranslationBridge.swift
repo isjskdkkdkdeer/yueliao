@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Translation
+import Speech
 import WebKit
 
 // Use YueLiaoAppleTranslationWebView() in the existing SwiftUI tab.
@@ -43,6 +44,7 @@ struct YueLiaoAppleTranslationWebView: View {
             let configuration = WKWebViewConfiguration()
             configuration.allowsInlineMediaPlayback = true
             configuration.userContentController.add(bridge, name: "appleTranslate")
+            configuration.userContentController.add(bridge.speech, name: "yueliaoSpeech")
             configuration.userContentController.addUserScript(WKUserScript(
                 source: TranslationWebAdapter.source, injectionTime: .atDocumentStart, forMainFrameOnly: true
             ))
@@ -59,7 +61,9 @@ struct YueLiaoAppleTranslationWebView: View {
         func updateUIView(_ webView: WKWebView, context: Context) {}
 
         static func dismantleUIView(_ webView: WKWebView, coordinator: ()) {
-            webView.configuration.userContentController.removeScriptMessageHandler(forName: "appleTranslate")
+            let controller = webView.configuration.userContentController
+            controller.removeScriptMessageHandler(forName: "appleTranslate")
+            controller.removeScriptMessageHandler(forName: "yueliaoSpeech")
         }
     }
 }
@@ -124,6 +128,7 @@ private final class AppleTranslationBridge: NSObject, ObservableObject, WKScript
         let engine: Engine
     }
 
+    let speech = AppleSpeechBridge()
     @Published private(set) var current: Work?
     private var pending: [Request] = []
     private var cache: [CacheKey: String] = [:]
@@ -141,6 +146,20 @@ private final class AppleTranslationBridge: NSObject, ObservableObject, WKScript
         self.webView = webView
 
         switch body["action"] as? String {
+        case "capabilities":
+            Task { @MainActor in
+                let low = await LanguageAvailability().status(from: Locale.Language(identifier: "zh-Hans"), to: Locale.Language(identifier: "vi"))
+                let capabilities = [
+                    "foundation": FoundationModelsEngine.supports(from: "zh-Hans", to: "vi"),
+                    "appleInstalled": low == .installed,
+                    "appleSupported": low == .installed || low == .supported,
+                    "speechChinese": speechAvailable("zh-CN"),
+                    "speechVietnamese": speechAvailable("vi-VN"),
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: capabilities),
+                   let text = String(data: data, encoding: .utf8) { reply(id, frame: frame, text: text) }
+            }
+            return
         case "cancel":
             pending.removeAll { $0.id == id }
             if current?.request.id == id { nextRequest() }
@@ -278,6 +297,10 @@ private final class AppleTranslationBridge: NSObject, ObservableObject, WKScript
         let engine = work.engine == .foundation ? "foundation" : "appleTranslation"
         reply(work.request.id, frame: work.request.frame, text: text, error: error, engine: error == nil ? engine : nil)
         nextRequest()
+    }
+
+    private func speechAvailable(_ language: String) -> Bool {
+        SFSpeechRecognizer(locale: Locale(identifier: language))?.supportsOnDeviceRecognition == true
     }
 
     private static func language(_ code: String?) -> String? {
