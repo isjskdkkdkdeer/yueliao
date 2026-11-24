@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {handleAccountApi} from './worker/account-api.js';
+const env={GROQ_API_KEY:'secret',SPEECH_ALLOWED_EMAILS:'owner@example.test'};
+const request=headers=>new Request('https://example.test/api/account',{headers});
+const guest=await handleAccountApi(request(),env);assert.match(guest.headers.get('cache-control'),/no-store/);assert.equal((await guest.json()).authenticated,false);
+const data=await handleAccountApi(request({'oai-authenticated-user-id':'1','oai-authenticated-user-email':'owner@example.test','oai-authenticated-user-full-name':encodeURIComponent('测试'),'oai-authenticated-user-full-name-encoding':'percent-encoded-utf-8'}),env).json();
+assert.equal(data.speechConfigured,true);assert.equal(data.speechAuthorized,true);
+assert.equal(data.name,'测试');assert.equal(data.email,'owner@example.test');assert.equal(data.assistantAuthorized,true);assert.ok(data.signOutUrl.startsWith('/signout-with-chatgpt?'));assert.ok(!JSON.stringify(data).includes('secret'));
+const other=await handleAccountApi(request({'oai-authenticated-user-id':'2','oai-authenticated-user-email':'other@example.test'}),env).json();
+assert.equal(other.assistantAuthorized,true);assert.equal(other.speechAuthorized,false);
+const supplemental = {...env,SPEECH_GROQ_ALLOWED_EMAILS:'other@example.test'};
+const otherRequest = request({'oai-authenticated-user-id':'2','oai-authenticated-user-email':'other@example.test'});
+assert.equal((await handleAccountApi(otherRequest,supplemental).json()).speechAuthorized,true);
+assert.equal((await handleAccountApi(otherRequest,{...supplemental,GROQ_API_KEY:'',OPENAI_API_KEY:'secret'}).json()).speechAuthorized,false);
+console.log('Account identity, anonymous state, authorization, logout link and no-store tests passed');

@@ -1,0 +1,28 @@
+{
+  "name": "yueliao-browser-experience",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vendor:peer": "node scripts/vendor-peer.mjs",
+    "test:peer": "node peer.test.mjs",
+    "test:app": "node app.test.mjs",
+    "test": "npm run test:peer && npm run test:app && npm run test:reentry && npm run test:subtitles && npm run test:speech && npm run test:ios && npm run test:worker && npm run test:i18n && node translation.test.mjs && node mailbox.test.mjs && node notifications.test.mjs",
+    "build": "node scripts/build-worker.mjs",
+    "test:subtitles": "node subtitles.test.mjs",
+    "test:speech": "node speech-stream.test.mjs",
+    "test:worker": "node worker.test.mjs",
+    "test:i18n": "node i18n.test.mjs",
+    "test:ios": "node ios-caption.test.mjs",
+    "test:reentry": "node reentry.test.mjs",
+    "dev": "node scripts/preview.mjs",
+    "test:notifications": "node notifications.test.mjs"
+  },
+  "dependencies": {
+    "@block65/webcrypto-web-push": "^2.0.0",
+    "peerjs": "1.5.5"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "jsdom": "^26.1.0"
+  }
+}

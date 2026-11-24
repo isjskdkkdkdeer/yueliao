@@ -1,0 +1,7 @@
+linh.jpg: https://randomuser.me/api/portraits/women/44.jpg
+minh.jpg: https://randomuser.me/api/portraits/men/32.jpg
+an.jpg: https://randomuser.me/api/portraits/women/65.jpg
+cafe.jpg: https://images.unsplash.com/photo-1442512595331-e89e73853f31?w=800&h=500&fit=crop&auto=format&q=80
+city.jpg: https://images.unsplash.com/photo-1555921015-5532091f6026?w=400&h=400&fit=crop&auto=format&q=75
+lake.jpg: https://images.unsplash.com/photo-1528127269322-539801943592?w=400&h=400&fit=crop&auto=format&q=75
+Demo portraits are illustrative only; not real chat users.

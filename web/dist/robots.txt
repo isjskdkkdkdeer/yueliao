@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /signin-with-chatgpt
+Disallow: /signout-with-chatgpt
+Sitemap: https://yueliao.eu.cc/sitemap.xml

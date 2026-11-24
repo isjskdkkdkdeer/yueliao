@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+import {createRinger} from './dist/notifications.js';
+const dom=new JSDOM('<body></body>');globalThis.document=dom.window.document;globalThis.CustomEvent=dom.window.CustomEvent;
+let plays=0,pauses=0,reject=false;
+dom.window.HTMLMediaElement.prototype.play=function(){plays++;return reject?Promise.reject(Error('NotAllowedError')):Promise.resolve()};
+dom.window.HTMLMediaElement.prototype.pause=function(){pauses++};
+const states=[];document.addEventListener('ringer-status',e=>states.push(e.detail));
+const flush=()=>new Promise(r=>setTimeout(r,0));
+const ring=createRinger();ring.start('outgoing');assert.equal(plays,1,'play must run synchronously in click handler');await flush();assert.equal(states.at(-1),'playing');
+const audio=document.querySelector('audio');assert.ok(audio.src.endsWith('ringback.wav'));assert.equal(audio.loop,true);assert.equal(audio.muted,false);
+ring.stop();assert.equal(pauses,1);reject=true;ring.start();await flush();assert.equal(states.at(-1),'blocked');assert.ok(audio.src.endsWith('ringtone.wav'));
+reject=false;ring.unlock();await flush();assert.equal(states.at(-1),'playing');ring.start();ring.stop();await flush();assert.equal(states.at(-1),'stopped','late playback completion cannot revive stopped ringtone');
+dom.window.close();console.log('PASS ringtone: gesture-synchronous media playback, incoming/outgoing assets, blocked playback feedback, retry and stop race.');
