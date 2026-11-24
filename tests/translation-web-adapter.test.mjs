@@ -10,7 +10,10 @@ const network = [];
 const origin = 'https://yueliao.eu.cc';
 const window = {
   webkit: { messageHandlers: { appleTranslate: { postMessage(message) { messages.push(message); } } } },
-  async fetch(input) { network.push(input); return Response.json({ ok: true }); },
+  async fetch(input) {
+    network.push(input instanceof Request ? await input.text() : input);
+    return Response.json({ ok: true });
+  },
 };
 runInNewContext(script, {
   window, location: { origin, href: origin + '/' }, crypto: webcrypto, URL, Request, Response, setTimeout, clearTimeout,
@@ -46,5 +49,6 @@ assert.equal(messages.at(-1).requestId, abortId);
 assert.equal(messages.at(-1).action, 'cancel');
 
 await window.fetch('/api/mailbox/test');
-assert.deepEqual(network, ['/api/mailbox/test']);
+await window.fetch(new Request(origin + '/api/mailbox/test', { method: 'POST', body: 'mailbox message' }));
+assert.deepEqual(network, ['/api/mailbox/test', 'mailbox message']);
 console.log('PASS native adapter: local result, no cloud fallback, cancellation, unrelated request passthrough');
