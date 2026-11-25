@@ -48,7 +48,12 @@ export function createTranslationApi({fetchImpl=globalThis.fetch,now=Date.now,ti
       if((response.status===404||response.status===429||response.status>=500)&&model===models[0])continue;
       if(response.status===429)return json({code:'RATE_LIMIT',error:'GLM 翻译额度暂时不足，请稍后重试'},429);
       if(!response.ok)return json({code:'UNAVAILABLE',error:'GLM 翻译暂不可用，请重试'},502);
-      const payload=await response.json();
+      let payload;
+      try{
+       payload=await response.json();
+      }catch(error){
+       if(controller.signal.aborted)throw error;
+      }
       const candidate=payload?.choices?.[0];
       const translated=candidate?.message?.content;
       if(candidate?.finish_reason!=='stop'||typeof translated!=='string'||!translated.trim()||translated.length>6000){
