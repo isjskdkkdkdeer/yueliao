@@ -1,0 +1,10 @@
+name = "yueliao"
+main = "dist/server/index.js"
+compatibility_date = "2026-11-25"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "yueliao-db"
+database_id = "9db470fb-0bd8-4c34-935e-ac7095912330"
+migrations_dir = "drizzle"
