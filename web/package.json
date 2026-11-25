@@ -6,7 +6,7 @@
     "vendor:peer": "node scripts/vendor-peer.mjs",
     "test:peer": "node peer.test.mjs",
     "test:app": "node app.test.mjs",
-    "test": "npm run test:peer && npm run test:app && npm run test:reentry && npm run test:subtitles && npm run test:speech && npm run test:ios && npm run test:worker && npm run test:i18n && node translation.test.mjs && node mailbox.test.mjs && node notifications.test.mjs",
+    "test": "npm run test:peer && npm run test:app && npm run test:reentry && npm run test:subtitles && npm run test:speech && npm run test:ios && npm run test:worker && node translation-api.test.mjs && npm run test:i18n && node translation.test.mjs && node mailbox.test.mjs && node notifications.test.mjs",
     "build": "node scripts/build-worker.mjs",
     "test:subtitles": "node subtitles.test.mjs",
     "test:speech": "node speech-stream.test.mjs",
