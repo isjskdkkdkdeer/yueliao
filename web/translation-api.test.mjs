@@ -10,7 +10,7 @@ const request=(headers=auth,body=translation)=>new Request(url,{method:'POST',he
 let calls=0;
 const api=createTranslationApi({fetchImpl:async (endpoint,options)=>{
   calls++;
-  assert.equal(endpoint,'https://open.bigmodel.cn/api/paas/v4/chat/completions');
+  assert.equal(endpoint,'https://api.z.ai/api/paas/v4/chat/completions');
   assert.equal(options.headers.Authorization,'Bearer '+env.GLM_API_KEY);
   const body=JSON.parse(options.body);
   assert.deepEqual(body.messages[1],{role:'user',content:'你好'});
