@@ -53,7 +53,7 @@ async function performTranslation(text, source, target, options, online) {
   const abort = () => controller.abort(options.signal.reason);
   options.signal?.throwIfAborted();
   options.signal?.addEventListener('abort', abort, {once:true});
-  const timer = setTimeout(() => controller.abort(), options.mode === 'call' ? 4500 : 12000);
+  const timer = setTimeout(() => controller.abort(), 12000);
   try {
     const response = await fetch('/api/translate', {
       method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','X-YueLiao-Consent':'translation'},
