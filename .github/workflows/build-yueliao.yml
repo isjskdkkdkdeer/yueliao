@@ -1031,9 +1031,9 @@ jobs:
           # Require an SDK that compiled the Foundation Models path into the app.
           xcrun otool -L Payload/YueLiao.app/YueLiao > app-frameworks.txt
           grep -F 'FoundationModels.framework/FoundationModels' app-frameworks.txt
-          # The bridge must be compiled into the executable exposed by this IPA.
-          /usr/bin/strings Payload/YueLiao.app/YueLiao > app-strings.txt
-          grep -Fx 'appleTranslate' app-strings.txt
+          # Optimized Swift can encode the bridge name as an inline small string.
+          grep -E 'SwiftCompile.*AppleTranslationBridge[.]swift' xcodebuild.log
+          grep -E 'SwiftCompile.*FoundationModelsEngine[.]swift' xcodebuild.log
           bash ../.github/workflows/patch-ios.sh post
           test -s Payload/YueLiao.app/Assets.car
           /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' Payload/YueLiao.app/Info.plist
