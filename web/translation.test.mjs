@@ -31,4 +31,16 @@ const requests=await Promise.all([translate('你好'),translate('你好')]);
 assert.equal(requests[0].provider,'glm');
 assert.deepEqual(...requests);
 assert.equal(uploaded,1);
+const delays=[];
+const setTimeoutOriginal=globalThis.setTimeout;
+globalThis.setTimeout=(callback,delay,...args)=>{
+  delays.push(delay);
+  return setTimeoutOriginal(callback,delay,...args);
+};
+try {
+  assert.equal((await translate('你好','zh','vi',{mode:'call'})).provider,'glm');
+  assert.deepEqual(delays,[12000]);
+} finally {
+  globalThis.setTimeout=setTimeoutOriginal;
+}
 console.log('PASS translation: local priority, sender/receiver cloud consent, minimal cloud payload and deduplication.');
