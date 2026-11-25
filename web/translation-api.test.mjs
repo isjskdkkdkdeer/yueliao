@@ -42,3 +42,18 @@ const fallback=createTranslationApi({fetchImpl:async (_url,options)=>{
 }});
 assert.equal((await (await fallback(request(),env)).json()).model,'glm-4-flash');
 assert.deepEqual(models,['glm-4.7-flash','glm-4-flash']);
+
+const malformedModels=[];
+const malformedFallback=createTranslationApi({fetchImpl:async (_url,options)=>{
+  malformedModels.push(JSON.parse(options.body).model);
+  return malformedModels.length===1
+    ? new Response('not JSON')
+    : Response.json({choices:[{finish_reason:'stop',message:{content:'Xin chào'}}]});
+}});
+const recovered=await malformedFallback(request(),env);
+assert.equal(recovered.status,200);
+assert.deepEqual(await recovered.json(),{text:'Xin chào',provider:'glm',model:'glm-4-flash'});
+assert.deepEqual(malformedModels,['glm-4.7-flash','glm-4-flash']);
+
+const malformed=createTranslationApi({fetchImpl:async()=>new Response('not JSON')});
+assert.equal((await malformed(request(),env)).status,502);
