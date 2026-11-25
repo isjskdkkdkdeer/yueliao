@@ -57,3 +57,24 @@ assert.deepEqual(malformedModels,['glm-4.7-flash','glm-4-flash']);
 
 const malformed=createTranslationApi({fetchImpl:async()=>new Response('not JSON')});
 assert.equal((await malformed(request(),env)).status,502);
+
+const networkModels=[];
+const networkFallback=createTranslationApi({fetchImpl:async (_url,options)=>{
+  networkModels.push(JSON.parse(options.body).model);
+  if(networkModels.length===1)throw new TypeError('fetch failed');
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'Xin chào'}}]});
+}});
+const networkResult=await networkFallback(request(),env);
+assert.equal(networkResult.status,200);
+assert.deepEqual(await networkResult.json(),{text:'Xin chào',provider:'glm',model:'glm-4-flash'});
+assert.deepEqual(networkModels,['glm-4.7-flash','glm-4-flash']);
+
+let timeoutCalls=0;
+const abortable=createTranslationApi({timeoutMs:1,fetchImpl:(_url,{signal})=>{
+  timeoutCalls++;
+  return new Promise((_,reject)=>{
+    signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+  });
+}});
+assert.equal((await abortable(request(),env)).status,504);
+assert.equal(timeoutCalls,1);
