@@ -32,7 +32,7 @@ export function createTranslationApi({fetchImpl=globalThis.fetch,now=Date.now,ti
    const result=await Promise.race([
     (async()=>{
      for(const model of models){
-      const response=await fetchImpl('https://open.bigmodel.cn/api/paas/v4/chat/completions',{
+      const response=await fetchImpl('https://api.z.ai/api/paas/v4/chat/completions',{
        method:'POST',
        headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},
        signal:controller.signal,
