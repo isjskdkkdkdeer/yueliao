@@ -1028,6 +1028,12 @@ jobs:
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/YueLiao.app Payload/
           test -x Payload/YueLiao.app/YueLiao
+          # Require an SDK that compiled the Foundation Models path into the app.
+          xcrun otool -L Payload/YueLiao.app/YueLiao > app-frameworks.txt
+          grep -F 'FoundationModels.framework/FoundationModels' app-frameworks.txt
+          # The bridge must be compiled into the executable exposed by this IPA.
+          /usr/bin/strings Payload/YueLiao.app/YueLiao > app-strings.txt
+          grep -Fx 'appleTranslate' app-strings.txt
           bash ../.github/workflows/patch-ios.sh post
           test -s Payload/YueLiao.app/Assets.car
           /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' Payload/YueLiao.app/Info.plist

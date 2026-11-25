@@ -196,10 +196,16 @@ private final class AppleTranslationBridge: NSObject, ObservableObject, WKScript
             engines = [.lowLatency]
         } else if let selected = Engine(rawValue: body["engine"] as? String ?? "") {
             engines = selected == .highFidelity && !hasHighFidelity ? [] : [selected]
-        } else if realtime {
-            engines = hasHighFidelity ? [.lowLatency, .highFidelity] : [.lowLatency]
         } else {
-            engines = hasHighFidelity ? [.foundation, .highFidelity, .lowLatency] : [.foundation, .lowLatency]
+            let frameworkEngines: [Engine]
+            if hasHighFidelity {
+                frameworkEngines = realtime ? [.lowLatency, .highFidelity] : [.highFidelity, .lowLatency]
+            } else {
+                frameworkEngines = [.lowLatency]
+            }
+            engines = FoundationModelsEngine.supports(from: from, to: to)
+                ? [.foundation] + frameworkEngines
+                : frameworkEngines
         }
         guard !engines.isEmpty else {
             reply(id, frame: frame, error: "此系统版本不支持所选翻译策略。")
