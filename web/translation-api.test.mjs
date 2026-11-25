@@ -78,3 +78,53 @@ const abortable=createTranslationApi({timeoutMs:1,fetchImpl:(_url,{signal})=>{
 }});
 assert.equal((await abortable(request(),env)).status,504);
 assert.equal(timeoutCalls,1);
+
+const hostedEnv={
+  ...env,
+  AZURE_TRANSLATOR_KEY:'azure-test-key',
+  AZURE_TRANSLATOR_REGION:'eastasia',
+  CLOUDFLARE_AI_ACCOUNT_ID:'cloudflare-test-account',
+  CLOUDFLARE_AI_TOKEN:'cloudflare-test-token',
+};
+const hostedCalls=[];
+const hosted=createTranslationApi({fetchImpl:async (endpoint,options)=>{
+  const address=new URL(endpoint);
+  hostedCalls.push(address.hostname);
+  const body=JSON.parse(options.body);
+  if(address.hostname==='api.cognitive.microsofttranslator.com'){
+    assert.equal(address.pathname,'/translate');
+    assert.equal(address.searchParams.get('api-version'),'3.0');
+    assert.equal(options.headers['Ocp-Apim-Subscription-Key'],hostedEnv.AZURE_TRANSLATOR_KEY);
+    assert.equal(options.headers['Ocp-Apim-Subscription-Region'],hostedEnv.AZURE_TRANSLATOR_REGION);
+    if(address.searchParams.get('from')==='zh-Hans'){
+      assert.equal(address.searchParams.get('to'),'vi');
+      assert.deepEqual(body,[{Text:'你好'}]);
+      return Response.json([{translations:[{text:'Xin chào',to:'vi'}]}]);
+    }
+    assert.equal(address.searchParams.get('from'),'vi');
+    assert.equal(address.searchParams.get('to'),'zh-Hans');
+    assert.deepEqual(body,[{Text:'Xin chào'}]);
+    return new Response(null,{status:429});
+  }
+  assert.equal(address.href,'https://api.cloudflare.com/client/v4/accounts/cloudflare-test-account/ai/run/@cf/meta/m2m100-1.2b');
+  assert.equal(options.headers.Authorization,'Bearer '+hostedEnv.CLOUDFLARE_AI_TOKEN);
+  assert.deepEqual(body,{text:'Xin chào',source_lang:'vi',target_lang:'zh'});
+  return Response.json({success:true,result:{translated_text:'你好'}});
+}});
+assert.deepEqual(await (await hosted(request(),hostedEnv)).json(),{text:'Xin chào',provider:'azure'});
+assert.deepEqual(await (await hosted(request(auth,{text:'Xin chào',source:'vi',target:'zh-CN'}),hostedEnv)).json(),{text:'你好',provider:'cloudflare'});
+assert.deepEqual(hostedCalls,['api.cognitive.microsofttranslator.com','api.cognitive.microsofttranslator.com','api.cloudflare.com']);
+
+const failoverHosts=[];
+const hostedFallback=createTranslationApi({timeoutMs:40,fetchImpl:async (endpoint,{signal})=>{
+  const {hostname}=new URL(endpoint);
+  failoverHosts.push(hostname);
+  if(hostname==='api.cognitive.microsofttranslator.com'){
+    return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+  }
+  if(hostname==='api.cloudflare.com')return new Response('not JSON');
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'Xin chào'}}]});
+}});
+assert.equal((await (await hostedFallback(request(),hostedEnv)).json()).provider,'glm');
+assert.deepEqual(failoverHosts,['api.cognitive.microsofttranslator.com','api.cloudflare.com','api.z.ai']);
+console.log('PASS hosted translation: Azure language mapping, Cloudflare fallback and timeout isolation.');

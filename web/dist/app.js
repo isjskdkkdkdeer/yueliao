@@ -213,7 +213,7 @@ function intelligentTranslationModal(){
   openModal(`<h2>智能翻译 · Dịch thông minh</h2>
   <p>本机优先。开启下面的选项后，原文或麦克风片段才可能发送给相应在线服务。</p>
   <p lang="vi">Ưu tiên xử lý trên thiết bị. Chỉ bật các tùy chọn dưới đây nếu bạn đồng ý dùng dịch vụ trực tuyến.</p>
-  <label><input type="checkbox" id="translation-cloud-text" ${prefs.onlineText?'checked':''}> 允许 GLM 在线翻译 · Cho phép dịch trực tuyến</label><br>
+  <label><input type="checkbox" id="translation-cloud-text" ${prefs.onlineText?'checked':''}> 允许在线翻译与备用服务 · Cho phép dịch trực tuyến và dịch vụ dự phòng</label><br>
   <label><input type="checkbox" id="translation-cloud-speech" ${prefs.onlineSpeech?'checked':''}> 允许 Groq 云端识别 · Cho phép nhận dạng giọng nói trực tuyến</label>
   <p id="translation-capabilities" role="status"></p>
   <button type="button" id="translation-download" hidden>准备中越离线语言包 · Tải gói ngôn ngữ</button>
